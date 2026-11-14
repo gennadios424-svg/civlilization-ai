@@ -672,7 +672,8 @@ public final class CivilizationAI implements ModInitializer {
                     for (int y = -4; y <= 16; y++) {
                         BlockPos pos = center.offset(x, y, z);
                         if (!level.hasChunkAt(pos)) continue;
-                        if (level.getBlockState(pos).is(BlockTags.LOGS)) {
+                        if (level.getBlockState(pos).is(BlockTags.LOGS)
+                                && hasClearLineOfSight(pos)) {
                             double distance = pos.distSqr(center);
                             if (distance < bestDistance) {
                                 best = pos.immutable();
@@ -768,6 +769,7 @@ public final class CivilizationAI implements ModInitializer {
             if (target == null) return true;
 
             lookAtBlock(target);
+            MovementController.stop(player);
             double distance = player.distanceToSqr(Vec3.atCenterOf(target));
             if (distance > 20.25) {
                 miningTarget = null;

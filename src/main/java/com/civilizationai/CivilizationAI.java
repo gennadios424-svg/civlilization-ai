@@ -355,7 +355,7 @@ public final class CivilizationAI implements ModInitializer {
 
             if (target == null || scanCooldown == 0) {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
-                    int searchRadius = personality.curiosity() > 0.65F ? 32 : 20;
+                    int searchRadius = 14 + Math.round(personality.curiosity() * 12.0F);
                     target = findNearestTreeLog(searchRadius);
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
@@ -421,6 +421,28 @@ public final class CivilizationAI implements ModInitializer {
             return total;
         }
 
+        private boolean isPlank(ItemStack stack) {
+            net.minecraft.world.item.Item item = stack.getItem();
+            return item == Items.OAK_PLANKS || item == Items.SPRUCE_PLANKS
+                    || item == Items.BIRCH_PLANKS || item == Items.JUNGLE_PLANKS
+                    || item == Items.ACACIA_PLANKS || item == Items.DARK_OAK_PLANKS
+                    || item == Items.MANGROVE_PLANKS || item == Items.CHERRY_PLANKS
+                    || item == Items.CRIMSON_PLANKS || item == Items.WARPED_PLANKS;
+        }
+
+        private boolean removePlanks(int amount) {
+            if (countPlanks() < amount) return false;
+            int remaining = amount;
+            for (int i = 0; i < player.getInventory().getContainerSize() && remaining > 0; i++) {
+                ItemStack stack = player.getInventory().getItem(i);
+                if (!isPlank(stack)) continue;
+                int removed = Math.min(remaining, stack.getCount());
+                stack.shrink(removed);
+                remaining -= removed;
+            }
+            return remaining == 0;
+        }
+
         private boolean removeItems(net.minecraft.world.item.Item item, int amount) {
             if (countItem(item) < amount) return false;
             int remaining = amount;
@@ -436,18 +458,24 @@ public final class CivilizationAI implements ModInitializer {
 
         private void advanceCrafting() {
             if (countItem(Items.CRAFTING_TABLE) == 0 && countItem(Items.OAK_PLANKS) >= 4) {
-                removeItems(Items.OAK_PLANKS, 4);
+                removePlanks(4);
                 player.getInventory().add(new ItemStack(Items.CRAFTING_TABLE));
             }
-            if (countItem(Items.STICK) < 2 && countItem(Items.OAK_PLANKS) >= 2) {
-                removeItems(Items.OAK_PLANKS, 2);
+            if (countItem(Items.STICK) < 2 && countPlanks() >= 2) {
+                removePlanks(2);
                 player.getInventory().add(new ItemStack(Items.STICK, 4));
             }
             if (countItem(Items.WOODEN_PICKAXE) == 0
-                    && countItem(Items.OAK_PLANKS) >= 3 && countItem(Items.STICK) >= 2) {
-                removeItems(Items.OAK_PLANKS, 3);
+                    && countPlanks() >= 3 && countItem(Items.STICK) >= 2) {
+                removePlanks(3);
                 removeItems(Items.STICK, 2);
                 player.getInventory().add(new ItemStack(Items.WOODEN_PICKAXE));
+            }
+            if (countItem(Items.WOODEN_AXE) == 0
+                    && countPlanks() >= 3 && countItem(Items.STICK) >= 2) {
+                removePlanks(3);
+                removeItems(Items.STICK, 2);
+                player.getInventory().add(new ItemStack(Items.WOODEN_AXE));
             }
         }
 
@@ -656,7 +684,9 @@ public final class CivilizationAI implements ModInitializer {
 
             // Require visible, timed mining progress instead of deleting blocks on contact.
             float hardness = state.getDestroySpeed(level, target);
-            int requiredTicks = Math.max(4, Math.min(100, (int) Math.ceil(hardness * 30.0F)));
+            boolean hasAxe = countItem(Items.WOODEN_AXE) > 0;
+            int requiredTicks = Math.max(4, Math.min(120,
+                    (int) Math.ceil(hardness * (hasAxe && state.is(BlockTags.LOGS) ? 7.0F : 30.0F))));
             miningProgress++;
             if (miningProgress % 5 == 0) {
                 player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
@@ -785,7 +815,7 @@ public final class CivilizationAI implements ModInitializer {
             int total = 0;
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                if (stack.is(Items.OAK_PLANKS)) total += stack.getCount();
+                if (isPlank(stack)) total += stack.getCount();
             }
             return total;
         }
@@ -831,7 +861,7 @@ public final class CivilizationAI implements ModInitializer {
 
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                if (stack.isEmpty() || !stack.is(Items.OAK_PLANKS)) continue;
+                if (stack.isEmpty() || !isPlank(stack)) continue;
 
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);

@@ -11,6 +11,9 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
+import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.server.MinecraftServer;
@@ -247,6 +250,19 @@ public final class CivilizationAI implements ModInitializer {
             data.put(prefix + "wander", encodePos(brain.wanderTarget));
             data.put(prefix + "shelter", encodePos(brain.shelterOrigin));
             data.put(prefix + "shelterIndex", Integer.toString(brain.shelterIndex));
+            data.put(prefix + "settlementName", brain.settlement == null ? null : brain.settlement.name());
+            data.put(prefix + "settlementCenter", brain.settlement == null ? "" : encodePos(brain.settlement.center()));
+            var registryOps = server.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+            for (int slot = 0; slot < brain.player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = brain.player.getInventory().getItem(slot);
+                String inventoryKey = prefix + "inventory." + slot;
+                if (stack.isEmpty()) {
+                    data.put(inventoryKey, null);
+                } else {
+                    ItemStack.CODEC.encodeStart(registryOps, stack).result()
+                            .ifPresent(tag -> data.put(inventoryKey, tag.toString()));
+                }
+            }
             for (Map.Entry<UUID, Integer> relationship : brain.relationships.entrySet()) {
                 data.put(prefix + "relationship." + relationship.getKey(), Integer.toString(relationship.getValue()));
             }
@@ -282,7 +298,37 @@ public final class CivilizationAI implements ModInitializer {
                 double z = Double.parseDouble(saved.getOrDefault(prefix + "z", "0"));
                 BlockPos pos = BlockPos.containing(x, y, z);
                 if (!level.hasChunkAt(pos)) continue;
-                createBot(level, pos, name, id, false);
+                FakePlayer restored = createBot(level, pos, name, id, false);
+                BotBrain brain = BOTS.get(id);
+                if (brain != null) {
+                    String savedSettlementName = saved.get(prefix + "settlementName");
+                    BlockPos savedSettlementCenter = decodePos(saved.get(prefix + "settlementCenter"));
+                    if (savedSettlementName != null && savedSettlementCenter != null) {
+                        Settlement settlement = SETTLEMENTS.values().stream()
+                                .filter(existing -> existing.level() == level
+                                        && existing.name().equals(savedSettlementName)
+                                        && existing.center().distSqr(savedSettlementCenter) <= 4)
+                                .findFirst().orElseGet(() -> {
+                                    Settlement created = new Settlement(savedSettlementName, level, savedSettlementCenter);
+                                    SETTLEMENTS.put(created.id(), created);
+                                    return created;
+                                });
+                        settlement.addMember(id, brain.profession);
+                        brain.settlement = settlement;
+                    }
+                    var registryOps = server.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+                    for (int slot = 0; slot < restored.getInventory().getContainerSize(); slot++) {
+                        String encoded = saved.get(prefix + "inventory." + slot);
+                        if (encoded == null || encoded.isBlank()) continue;
+                        try {
+                            Tag tag = TagParser.parseTag(encoded);
+                            ItemStack.CODEC.parse(registryOps, tag).result()
+                                    .ifPresent(stack -> restored.getInventory().setItem(slot, stack));
+                        } catch (Exception invalidStack) {
+                            LOGGER.warn("[Civilization AI] Skipped invalid saved inventory stack for {} slot {}", id, slot);
+                        }
+                    }
+                }
             } catch (RuntimeException exception) {
                 LOGGER.warn("[Civilization AI] Could not restore citizen {}", id, exception);
             }

@@ -509,40 +509,78 @@ public final class CivilizationAI implements ModInitializer {
                 removeItems(Items.STICK, 2);
                 player.getInventory().add(new ItemStack(Items.WOODEN_AXE));
             }
+            if (countItem(Items.WOODEN_HOE) == 0
+                    && countPlanks() >= 2 && countItem(Items.STICK) >= 2) {
+                removePlanks(2);
+                removeItems(Items.STICK, 2);
+                player.getInventory().add(new ItemStack(Items.WOODEN_HOE));
+            }
         }
 
         private void manageFoodAndFarm(int gameTick) {
-            if (gameTick % 40 != 0 || farmCooldown > 0) return;
-            farmCooldown = 40;
+            if (gameTick % 20 != 0 || farmCooldown > 0) return;
+            farmCooldown = 20;
+
+            // Harvest only crops the citizen can physically reach and see.
             for (BlockPos pos : BlockPos.betweenClosed(
-                    player.blockPosition().offset(-8, -2, -8),
-                    player.blockPosition().offset(8, 2, 8))) {
+                    player.blockPosition().offset(-6, -2, -6),
+                    player.blockPosition().offset(6, 2, 6))) {
                 BlockState cropState = level.getBlockState(pos);
                 if (cropState.getBlock() instanceof CropBlock crop
-                        && cropState.getValue(CropBlock.AGE) >= crop.getMaxAge()) {
-                    level.destroyBlock(pos, false, player);
-                    player.getInventory().add(new ItemStack(Items.WHEAT));
-                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                        && cropState.getValue(CropBlock.AGE) >= crop.getMaxAge()
+                        && player.distanceToSqr(Vec3.atCenterOf(pos)) <= 4.0
+                        && hasClearLineOfSight(pos)) {
+                    lookAtBlock(pos);
+                    if (level.destroyBlock(pos, false, player)) {
+                        player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                        player.getInventory().add(new ItemStack(Items.WHEAT));
+                        player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                    }
                     break;
                 }
             }
+
             if (countItem(Items.WHEAT_SEEDS) > 0) {
                 BlockPos base = player.blockPosition();
                 for (int dx = -3; dx <= 3; dx++) {
                     for (int dz = -3; dz <= 3; dz++) {
                         BlockPos soil = base.offset(dx, -1, dz);
                         BlockPos cropPos = soil.above();
-                        if (level.getBlockState(cropPos).isAir()
-                                && (level.getBlockState(soil).is(Blocks.DIRT)
-                                || level.getBlockState(soil).is(Blocks.GRASS_BLOCK))) {
-                            level.setBlock(soil, Blocks.FARMLAND.defaultBlockState(), 3);
-                            level.setBlock(cropPos, Blocks.WHEAT.defaultBlockState(), 3);
-                            removeItems(Items.WHEAT_SEEDS, 1);
-                            return;
+                        if (!level.getBlockState(cropPos).isAir()
+                                || player.distanceToSqr(Vec3.atCenterOf(soil)) > 4.0
+                                || !hasClearLineOfSight(soil)) continue;
+
+                        BlockState soilState = level.getBlockState(soil);
+                        if (soilState.is(Blocks.DIRT) || soilState.is(Blocks.GRASS_BLOCK)) {
+                            ItemStack hoe = findTool(Items.WOODEN_HOE);
+                            if (hoe == null) continue;
+                            lookAtBlock(soil);
+                            BlockHitResult tillHit = new BlockHitResult(
+                                    Vec3.atCenterOf(soil).add(0, 0.5, 0),
+                                    Direction.UP, soil, false
+                            );
+                            player.gameMode.useItemOn(
+                                    player, level, hoe, net.minecraft.world.InteractionHand.MAIN_HAND, tillHit
+                            );
+                            soilState = level.getBlockState(soil);
                         }
+
+                        if (!soilState.is(Blocks.FARMLAND)) continue;
+                        ItemStack seeds = findTool(Items.WHEAT_SEEDS);
+                        if (seeds == null) continue;
+                        lookAtBlock(soil);
+                        BlockHitResult plantHit = new BlockHitResult(
+                                Vec3.atCenterOf(soil).add(0, 0.5, 0),
+                                Direction.UP, soil, false
+                        );
+                        player.gameMode.useItemOn(
+                                player, level, seeds, net.minecraft.world.InteractionHand.MAIN_HAND, plantHit
+                        );
+                        if (level.getBlockState(cropPos).is(Blocks.WHEAT)) return;
                     }
                 }
             }
+
             if (countItem(Items.WHEAT) >= 3) {
                 removeItems(Items.WHEAT, 3);
                 player.getInventory().add(new ItemStack(Items.BREAD));
@@ -553,6 +591,13 @@ public final class CivilizationAI implements ModInitializer {
             }
         }
 
+        private ItemStack findTool(net.minecraft.world.item.Item item) {
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.is(item)) return stack;
+            }
+            return null;
+        }
 
         private BlockPos findNearestGrass(int radius) {
             BlockPos center = player.blockPosition();

@@ -385,6 +385,10 @@ public final class CivilizationAI implements ModInitializer {
                         target = findNearestGrass(24);
                     }
                     if (target == null) target = findNearestTreeLog(searchRadius);
+                    if (target == null && countItem(Items.WOODEN_PICKAXE) > 0
+                            && countItem(Items.COBBLESTONE) < 12) {
+                        target = findNearestExposedStone(12);
+                    }
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
                         target = null;
@@ -517,6 +521,12 @@ public final class CivilizationAI implements ModInitializer {
                 removeItems(Items.STICK, 2);
                 player.getInventory().add(new ItemStack(Items.WOODEN_HOE));
             }
+            if (countItem(Items.STONE_PICKAXE) == 0
+                    && countItem(Items.COBBLESTONE) >= 3 && countItem(Items.STICK) >= 2) {
+                removeItems(Items.COBBLESTONE, 3);
+                removeItems(Items.STICK, 2);
+                player.getInventory().add(new ItemStack(Items.STONE_PICKAXE));
+            }
         }
 
         private void manageFoodAndFarm(int gameTick) {
@@ -617,6 +627,30 @@ public final class CivilizationAI implements ModInitializer {
                                 best = pos.immutable();
                                 bestDistance = distance;
                             }
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
+        private BlockPos findNearestExposedStone(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
+                    if (x * x + z * z > radius * radius) continue;
+                    for (int y = -3; y <= 5; y++) {
+                        BlockPos pos = center.offset(x, y, z);
+                        if (!level.hasChunkAt(pos) || !hasClearLineOfSight(pos)) continue;
+                        BlockState state = level.getBlockState(pos);
+                        if (!(state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                                || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE))) continue;
+                        double distance = pos.distSqr(center);
+                        if (distance < bestDistance) {
+                            best = pos.immutable();
+                            bestDistance = distance;
                         }
                     }
                 }
@@ -764,8 +798,12 @@ public final class CivilizationAI implements ModInitializer {
             // Require visible, timed mining progress instead of deleting blocks on contact.
             float hardness = state.getDestroySpeed(level, target);
             boolean hasAxe = countItem(Items.WOODEN_AXE) > 0;
-            int requiredTicks = Math.max(4, Math.min(120,
-                    (int) Math.ceil(hardness * (hasAxe && state.is(BlockTags.LOGS) ? 7.0F : 30.0F))));
+            boolean hasPickaxe = countItem(Items.STONE_PICKAXE) > 0
+                    || countItem(Items.WOODEN_PICKAXE) > 0;
+            float toolFactor = state.is(BlockTags.LOGS) && hasAxe ? 7.0F
+                    : (state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                    || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE)) && hasPickaxe ? 8.0F : 30.0F;
+            int requiredTicks = Math.max(4, Math.min(160, (int) Math.ceil(hardness * toolFactor)));
             miningProgress++;
             if (miningProgress % 5 == 0) {
                 player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
@@ -777,7 +815,12 @@ public final class CivilizationAI implements ModInitializer {
             miningTarget = null;
             miningProgress = 0;
             if (broken) {
-                ItemStack collected = new ItemStack(itemBlock.asItem());
+                net.minecraft.world.item.Item drop = itemBlock.asItem();
+                if (state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                        || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE)) {
+                    drop = Items.COBBLESTONE;
+                }
+                ItemStack collected = new ItemStack(drop);
                 if (!collected.isEmpty()) player.getInventory().add(collected);
                 if ((state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS))
                         && RANDOM.nextInt(3) == 0 && countItem(Items.WHEAT_SEEDS) < 16) {

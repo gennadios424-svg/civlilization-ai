@@ -130,12 +130,14 @@ public final class CivilizationAI implements ModInitializer {
         bot.setCustomName(Component.literal(name));
         bot.setCustomNameVisible(true);
 
+        // Register the fake player with the world entity tracker and publish its profile first.
         level.addNewPlayer(bot);
-        if (!level.getServer().getPlayerList().getPlayers().contains(bot)) {
-            level.getServer().getPlayerList().getPlayers().add(bot);
-        }
         level.getServer().getPlayerList().broadcastAll(
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
+        );
+        // Explicitly send the player spawn packet so clients create the visible player model.
+        level.getServer().getPlayerList().broadcastAll(
+                new net.minecraft.network.protocol.game.ClientboundAddPlayerPacket(bot)
         );
         level.getServer().getPlayerList().broadcastSystemMessage(
                 Component.literal("<" + name + "> Hey! I'm exploring this world."),
@@ -176,7 +178,6 @@ public final class CivilizationAI implements ModInitializer {
     }
 
     private static void tickBots(MinecraftServer server) {
-        if (server.getTickCount() % 5 != 0) return;
         for (BotBrain brain : BOTS.values()) {
             if (brain.player.isRemoved() || !brain.level.players().contains(brain.player)) continue;
             brain.tick(server.getTickCount());
@@ -315,8 +316,12 @@ public final class CivilizationAI implements ModInitializer {
             Vec3 direction = new Vec3(targetPoint.x - current.x, 0, targetPoint.z - current.z);
             double distance = direction.length();
             if (distance < 0.05) return;
-            Vec3 step = direction.normalize().scale(Math.min(0.12, distance));
-            player.setYRot((float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI)));
+            // Small per-tick steps avoid visible position jumps from coarse 5-tick updates.
+            Vec3 step = direction.normalize().scale(Math.min(0.018, distance));
+            float desiredYaw = (float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI));
+            float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
+            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -4.0F, 4.0F));
+            player.yBodyRot = player.getYRot();
             player.move(MoverType.SELF, step);
         }
 

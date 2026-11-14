@@ -17,11 +17,6 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.MoverType;
-import net.minecraft.world.entity.animal.Animal;
-import net.minecraft.world.entity.animal.Cow;
-import net.minecraft.world.entity.animal.Pig;
-import net.minecraft.world.entity.animal.Sheep;
-import net.minecraft.world.entity.animal.Chicken;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -451,8 +446,8 @@ public final class CivilizationAI implements ModInitializer {
         private final Personality personality;
         private final Personality.Profession profession;
         private Settlement settlement;
-        private Animal foodTarget;
-        private int huntCooldown;
+        private BlockPos foodTarget;
+        private int foodActionCooldown;
         private List<BlockPos> navigationPath = new ArrayList<>();
         private BlockPos pathDestination;
         private int pathRecalculationCooldown;
@@ -509,7 +504,7 @@ public final class CivilizationAI implements ModInitializer {
             if (socialCooldown > 0) socialCooldown--;
             if (friendshipGestureCooldown > 0) friendshipGestureCooldown--;
             if (farmCooldown > 0) farmCooldown--;
-            if (huntCooldown > 0) huntCooldown--;
+            if (foodActionCooldown > 0) foodActionCooldown--;
             if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
             if (manageSurvival()) return;
             handleNearbyPlayers();
@@ -596,37 +591,69 @@ public final class CivilizationAI implements ModInitializer {
 
 
         private boolean manageSurvival() {
-            if (SurvivalController.eatFromInventory(player)) return true;
-            if (player.getFoodData().getFoodLevel() > 8) return false;
-
-            if (foodTarget == null || !foodTarget.isAlive()
-                    || foodTarget.distanceToSqr(player) > 24.0 * 24.0) {
-                foodTarget = level.getEntitiesOfClass(
-                        Animal.class, player.getBoundingBox().inflate(20.0),
-                        animal -> animal.isAlive() && (animal instanceof Cow || animal instanceof Pig
-                                || animal instanceof Sheep || animal instanceof Chicken)
-                ).stream().min((a, b) -> Double.compare(
-                        a.distanceToSqr(player), b.distanceToSqr(player)
-                )).orElse(null);
+            if (SurvivalController.eatFromInventory(player)) {
+                foodTarget = null;
+                return true;
+            }
+            if (player.getFoodData().getFoodLevel() > 8) {
+                foodTarget = null;
+                return false;
             }
 
+            // Prefer non-combat food gathering when critically hungry. Mature
+            // berry bushes are harvested through the normal block interaction.
+            if (foodTarget == null || !level.getBlockState(foodTarget).is(Blocks.SWEET_BERRY_BUSH)
+                    || foodTarget.distSqr(player.blockPosition()) > 24 * 24) {
+                foodTarget = findNearestBerryBush(20);
+            }
             if (foodTarget == null) return false;
-            if (player.distanceToSqr(foodTarget) > 4.0) {
-                walkToward(foodTarget.blockPosition());
+
+            if (player.distanceToSqr(Vec3.atCenterOf(foodTarget)) > 4.0) {
+                walkToward(foodTarget);
                 return true;
             }
 
             MovementController.stop(player);
-            MovementController.face(player, foodTarget.getEyePosition());
-            if (huntCooldown == 0 && foodTarget.isAlive()) {
-                // Use the normal player attack pipeline; no scripted mob deletion or
-                // manufactured drops. The world's normal loot and pickup systems apply.
-                player.attack(foodTarget);
+            lookAtBlock(foodTarget);
+            if (foodActionCooldown == 0) {
+                int before = countItem(Items.SWEET_BERRIES);
+                BlockHitResult hit = new BlockHitResult(
+                        Vec3.atCenterOf(foodTarget), Direction.UP, foodTarget, false
+                );
+                player.gameMode.useItemOn(
+                        player, level, ItemStack.EMPTY, net.minecraft.world.InteractionHand.MAIN_HAND, hit
+                );
                 player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-                huntCooldown = 20;
-                if (!foodTarget.isAlive()) foodTarget = null;
+                foodActionCooldown = 20;
+                if (countItem(Items.SWEET_BERRIES) > before
+                        || !level.getBlockState(foodTarget).is(Blocks.SWEET_BERRY_BUSH)) {
+                    foodTarget = null;
+                }
             }
             return true;
+        }
+
+        private BlockPos findNearestBerryBush(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dy = -3; dy <= 5; dy++) {
+                        BlockPos pos = center.offset(dx, dy, dz);
+                        if (!level.hasChunkAt(pos)) continue;
+                        BlockState state = level.getBlockState(pos);
+                        if (!state.is(Blocks.SWEET_BERRY_BUSH)
+                                || state.getValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE) < 2) continue;
+                        double distance = pos.distSqr(center);
+                        if (distance < bestDistance) {
+                            best = pos.immutable();
+                            bestDistance = distance;
+                        }
+                    }
+                }
+            }
+            return best;
         }
 
         private int countItem(net.minecraft.world.item.Item item) {

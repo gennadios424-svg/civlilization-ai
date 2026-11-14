@@ -322,8 +322,9 @@ public final class CivilizationAI implements ModInitializer {
                         if (encoded == null || encoded.isBlank()) continue;
                         try {
                             Tag tag = TagParser.parseTag(encoded);
+                            int inventorySlot = slot;
                             ItemStack.CODEC.parse(registryOps, tag).result()
-                                    .ifPresent(stack -> restored.getInventory().setItem(slot, stack));
+                                    .ifPresent(stack -> restored.getInventory().setItem(inventorySlot, stack));
                         } catch (Exception invalidStack) {
                             LOGGER.warn("[Civilization AI] Skipped invalid saved inventory stack for {} slot {}", id, slot);
                         }

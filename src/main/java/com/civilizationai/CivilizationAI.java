@@ -384,9 +384,12 @@ public final class CivilizationAI implements ModInitializer {
                             && countItem(Items.WHEAT_SEEDS) < 8) {
                         target = findNearestGrass(24);
                     }
-                    if (target == null) target = findNearestTreeLog(searchRadius);
-                    if (target == null && countItem(Items.WOODEN_PICKAXE) > 0
-                            && countItem(Items.COBBLESTONE) < 12) {
+                    if (target == null && needsWoodForPlan()) {
+                        target = findNearestTreeLog(searchRadius);
+                    }
+                    if (target == null && countItem(Items.STONE_PICKAXE) == 0
+                            && countItem(Items.COBBLESTONE) < 3
+                            && countItem(Items.WOODEN_PICKAXE) > 0) {
                         target = findNearestExposedStone(12);
                     }
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
@@ -936,6 +939,38 @@ public final class CivilizationAI implements ModInitializer {
                 int personalAmount = amount - sharedAmount;
                 if (personalAmount > 0) player.getInventory().add(new ItemStack(plankItem, personalAmount));
             }
+        }
+
+        private int countLogs() {
+            int total = 0;
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.isEmpty()) continue;
+                Block block = Block.byItem(stack.getItem());
+                if (block != Blocks.AIR && block.defaultBlockState().is(BlockTags.LOGS)) {
+                    total += stack.getCount();
+                }
+            }
+            return total;
+        }
+
+        private int countWoodEquivalent() {
+            return countPlanks() + countLogs() * 4;
+        }
+
+        /**
+         * Wood is gathered only against a concrete near-term bill of materials:
+         * shelter blocks plus any missing starter station/tools. This prevents
+         * the old "find another tree" loop after the inventory is already ready.
+         */
+        private boolean needsWoodForPlan() {
+            int shelterGoal = profession == Personality.Profession.BUILDER ? 17 : 21;
+            int requiredPlanks = shelterGoal;
+            if (countItem(Items.CRAFTING_TABLE) == 0) requiredPlanks += 4;
+            if (countItem(Items.STICK) < 2) requiredPlanks += 2;
+            if (countItem(Items.WOODEN_PICKAXE) == 0) requiredPlanks += 3;
+            if (countItem(Items.WOODEN_AXE) == 0) requiredPlanks += 3;
+            return countWoodEquivalent() < requiredPlanks;
         }
 
         private int countPlanks() {

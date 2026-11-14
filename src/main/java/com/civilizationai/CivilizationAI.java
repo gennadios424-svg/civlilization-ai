@@ -185,6 +185,40 @@ public final class CivilizationAI implements ModInitializer {
             if (brain.player.isRemoved() || !brain.level.players().contains(brain.player)) continue;
             brain.tick(server.getTickCount());
         }
+        if (server.getTickCount() % 10 == 0) coordinateTeams();
+    }
+
+    private static void coordinateTeams() {
+        List<BotBrain> active = new ArrayList<>(BOTS.values());
+        for (int i = 0; i < active.size(); i++) {
+            BotBrain leader = active.get(i);
+            if (leader.player.isRemoved()) continue;
+            for (int j = i + 1; j < active.size(); j++) {
+                BotBrain member = active.get(j);
+                if (member.player.isRemoved() || member.level != leader.level) continue;
+                if (leader.player.distanceToSqr(member.player) > 36.0) continue;
+
+                Vec3 towardMember = member.player.getEyePosition().subtract(leader.player.getEyePosition());
+                float leaderYaw = (float) (Math.atan2(-towardMember.x, towardMember.z) * (180.0 / Math.PI));
+                leader.player.setYRot(leaderYaw);
+                leader.player.setYHeadRot(leaderYaw);
+                leader.player.yBodyRot = leaderYaw;
+                leader.player.setShiftKeyDown(true);
+                member.player.setShiftKeyDown(true);
+                leader.crouchTicks = Math.max(leader.crouchTicks, 20);
+                member.crouchTicks = Math.max(member.crouchTicks, 20);
+
+                // Share spare building blocks so the pair can contribute to one shelter.
+                for (int slot = 0; slot < member.player.getInventory().getContainerSize(); slot++) {
+                    ItemStack stack = member.player.getInventory().getItem(slot);
+                    if (stack.isEmpty() || Block.byItem(stack.getItem()) == Blocks.AIR) continue;
+                    ItemStack transfer = stack.copy();
+                    transfer.setCount(Math.min(8, stack.getCount()));
+                    if (leader.player.getInventory().add(transfer)) stack.shrink(transfer.getCount());
+                    break;
+                }
+            }
+        }
     }
 
     private static List<BlockPos> createShelterLayout() {
@@ -331,13 +365,12 @@ public final class CivilizationAI implements ModInitializer {
             player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -2.5F, 2.5F));
             player.yBodyRot = player.getYRot();
             Vec3 velocity = player.getDeltaMovement();
-            double vertical = Math.max(-0.35, velocity.y - 0.08);
-            if (!level.noCollision(player, player.getBoundingBox().move(step.x, 0, step.z))) {
-                step = Vec3.ZERO;
+            if (!level.noCollision(player, player.getBoundingBox().move(step.x * 2.0, 0, step.z * 2.0))) {
                 if (player.onGround()) player.jumpFromGround();
+                else step = Vec3.ZERO;
             }
-            player.move(MoverType.SELF, new Vec3(step.x, vertical, step.z));
-            player.setDeltaMovement(step.x * 0.65, player.getDeltaMovement().y, step.z * 0.65);
+            // Vanilla ServerPlayer ticking applies gravity, collision response and limb animation.
+            player.setDeltaMovement(step.x * 0.65, velocity.y, step.z * 0.65);
         }
 
         private void gatherTarget() {

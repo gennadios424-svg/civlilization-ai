@@ -167,7 +167,7 @@ public final class CivilizationAI implements ModInitializer {
                 }
             }
         }
-        return level.getServer().overworld().getSharedSpawnPos();
+        return BlockPos.ZERO;
     }
 
     private static String randomName() {

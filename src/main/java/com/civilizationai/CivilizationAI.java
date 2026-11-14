@@ -519,16 +519,37 @@ public final class CivilizationAI implements ModInitializer {
             player.setSprinting(true);
         }
 
-        private void gatherTarget() {
-            if (target == null) return;
+        private boolean gatherTarget() {
+            if (target == null) return true;
             lookAtBlock(target);
-            if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return;
+            if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return false;
             BlockState state = level.getBlockState(target);
-            if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
-            if (!hasClearLineOfSight(target)) return;
+            if (state.isAir() || state.getDestroySpeed(level, target) < 0
+                    || !hasClearLineOfSight(target)) {
+                miningTarget = null;
+                miningProgress = 0;
+                return true;
+            }
+
+            if (!target.equals(miningTarget)) {
+                miningTarget = target.immutable();
+                miningProgress = 0;
+            }
+
+            // Require visible, timed mining progress instead of deleting blocks on contact.
+            float hardness = state.getDestroySpeed(level, target);
+            int requiredTicks = Math.max(4, Math.min(100, (int) Math.ceil(hardness * 30.0F)));
+            miningProgress++;
+            if (miningProgress % 5 == 0) {
+                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+            }
+            if (miningProgress < requiredTicks) return false;
+
             Block itemBlock = state.getBlock();
-            player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-            if (level.destroyBlock(target, false, player)) {
+            boolean broken = level.destroyBlock(target, false, player);
+            miningTarget = null;
+            miningProgress = 0;
+            if (broken) {
                 ItemStack collected = new ItemStack(itemBlock.asItem());
                 if (!collected.isEmpty()) player.getInventory().add(collected);
                 if ((state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS))
@@ -536,10 +557,11 @@ public final class CivilizationAI implements ModInitializer {
                     player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
                 }
                 level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().getName() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
+                        Component.literal("<" + player.getGameProfile().name() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
                         false
                 );
             }
+            return true;
         }
 
         private boolean hasClearLineOfSight(BlockPos pos) {
@@ -637,7 +659,7 @@ public final class CivilizationAI implements ModInitializer {
                 shelterOrigin = null;
                 target = null;
                 level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().getName() + "> Shelter built! This place is ours. Time to explore."),
+                        Component.literal("<" + player.getGameProfile().name() + "> Shelter built! This place is ours. Time to explore."),
                         false
                 );
                 return;
@@ -692,7 +714,7 @@ public final class CivilizationAI implements ModInitializer {
                 player.setShiftKeyDown(true);
                 if (nearby.isShiftKeyDown()) {
                     level.getServer().getPlayerList().broadcastSystemMessage(
-                            Component.literal(player.getGameProfile().getName() + " and " + nearby.getGameProfile().getName() + " are teaming up!"),
+                            Component.literal(player.getGameProfile().name() + " and " + nearby.getGameProfile().name() + " are teaming up!"),
                             false
                     );
                 }

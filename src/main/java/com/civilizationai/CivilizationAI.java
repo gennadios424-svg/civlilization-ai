@@ -251,6 +251,8 @@ public final class CivilizationAI implements ModInitializer {
         private int socialCooldown;
         private BlockPos wanderTarget;
         private int farmCooldown;
+        private BlockPos miningTarget;
+        private int miningProgress;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
@@ -293,9 +295,9 @@ public final class CivilizationAI implements ModInitializer {
                 lookAtBlock(target);
                 if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0) {
                     if (actionCooldown == 0) {
-                        gatherTarget();
-                        actionCooldown = 12;
-                        target = null;
+                        boolean finished = gatherTarget();
+                        actionCooldown = finished ? 8 : 1;
+                        if (finished) target = null;
                     }
                 } else {
                     walkToward(target);

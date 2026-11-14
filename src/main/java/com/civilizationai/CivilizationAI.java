@@ -512,12 +512,6 @@ public final class CivilizationAI implements ModInitializer {
                 removeItems(Items.STICK, 2);
                 player.getInventory().add(new ItemStack(Items.WOODEN_PICKAXE));
             }
-            if (countItem(Items.WOODEN_AXE) == 0
-                    && countPlanks() >= 3 && countItem(Items.STICK) >= 2) {
-                removePlanks(3);
-                removeItems(Items.STICK, 2);
-                player.getInventory().add(new ItemStack(Items.WOODEN_AXE));
-            }
             if (countItem(Items.WOODEN_HOE) == 0
                     && countPlanks() >= 2 && countItem(Items.STICK) >= 2) {
                 removePlanks(2);
@@ -812,34 +806,23 @@ public final class CivilizationAI implements ModInitializer {
         }
 
         private void selectMiningTool(BlockState state) {
-            boolean logs = state.is(BlockTags.LOGS);
+            // Only select a pickaxe for stone-like blocks. Log gathering uses the
+            // currently held item and never changes to a combat-oriented item.
             boolean stone = state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
                     || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE);
-            if (!logs && !stone) return;
-
-            net.minecraft.world.item.Item preferred = logs
-                    ? Items.WOODEN_AXE : Items.WOODEN_PICKAXE;
-            net.minecraft.world.item.Item better = logs
-                    ? Items.STONE_AXE : Items.STONE_PICKAXE;
+            if (!stone) return;
 
             int selected = player.getInventory().selected;
             ItemStack held = player.getInventory().getSelected();
-            if (held.is(preferred) || held.is(better)
-                    || (logs && (held.is(Items.IRON_AXE) || held.is(Items.DIAMOND_AXE) || held.is(Items.NETHERITE_AXE)))
-                    || (stone && (held.is(Items.IRON_PICKAXE) || held.is(Items.DIAMOND_PICKAXE) || held.is(Items.NETHERITE_PICKAXE)))) {
-                return;
-            }
+            if (held.is(Items.WOODEN_PICKAXE) || held.is(Items.STONE_PICKAXE)
+                    || held.is(Items.IRON_PICKAXE) || held.is(Items.DIAMOND_PICKAXE)
+                    || held.is(Items.NETHERITE_PICKAXE)) return;
 
             for (int slot = 0; slot < 9; slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                boolean suitable = logs
-                        ? stack.is(Items.WOODEN_AXE) || stack.is(Items.STONE_AXE)
-                            || stack.is(Items.IRON_AXE) || stack.is(Items.DIAMOND_AXE)
-                            || stack.is(Items.NETHERITE_AXE)
-                        : stack.is(Items.WOODEN_PICKAXE) || stack.is(Items.STONE_PICKAXE)
-                            || stack.is(Items.IRON_PICKAXE) || stack.is(Items.DIAMOND_PICKAXE)
-                            || stack.is(Items.NETHERITE_PICKAXE);
-                if (suitable) {
+                if (stack.is(Items.WOODEN_PICKAXE) || stack.is(Items.STONE_PICKAXE)
+                        || stack.is(Items.IRON_PICKAXE) || stack.is(Items.DIAMOND_PICKAXE)
+                        || stack.is(Items.NETHERITE_PICKAXE)) {
                     player.getInventory().selected = slot;
                     return;
                 }
@@ -971,7 +954,6 @@ public final class CivilizationAI implements ModInitializer {
             if (countItem(Items.CRAFTING_TABLE) == 0) requiredPlanks += 4;
             if (countItem(Items.STICK) < 2) requiredPlanks += 2;
             if (countItem(Items.WOODEN_PICKAXE) == 0) requiredPlanks += 3;
-            if (countItem(Items.WOODEN_AXE) == 0) requiredPlanks += 3;
             return countWoodEquivalent() < requiredPlanks;
         }
 

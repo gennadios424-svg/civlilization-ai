@@ -675,11 +675,16 @@ public final class CivilizationAI implements ModInitializer {
 
         private void buildShelter(int gameTick) {
             if (actionCooldown > 0) return;
-            if (shelterOrigin == null) shelterOrigin = player.blockPosition().offset(3, 0, 0);
+            if (shelterOrigin == null) shelterOrigin = findShelterSite(8);
+            if (shelterOrigin == null) {
+                state = State.EXPLORING;
+                return;
+            }
             if (shelterIndex >= SHELTER_LAYOUT.size()) {
                 state = State.EXPLORING;
                 shelterOrigin = null;
                 target = null;
+                player.setSprinting(false);
                 level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.literal("<" + player.getGameProfile().name() + "> Shelter built! This place is ours. Time to explore."),
                         false
@@ -692,29 +697,62 @@ public final class CivilizationAI implements ModInitializer {
                     SHELTER_LAYOUT.get(shelterIndex).getY(),
                     SHELTER_LAYOUT.get(shelterIndex).getZ()
             );
-            shelterIndex++;
-            if (!level.getBlockState(placeAt).isAir()) return;
-            if (!level.getBlockState(placeAt.below()).isSolid()) return;
+            if (!level.getBlockState(placeAt).isAir()) {
+                shelterIndex++;
+                return;
+            }
 
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                if (stack.isEmpty()) continue;
-                Block block = Block.byItem(stack.getItem());
-                if (block != Blocks.OAK_PLANKS) continue;
+                if (stack.isEmpty() || !stack.is(Items.OAK_PLANKS)) continue;
+
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);
-                    shelterIndex--;
                     return;
                 }
-                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-                level.setBlock(placeAt, block.defaultBlockState(), 3);
-                stack.shrink(1);
-                player.containerMenu.broadcastChanges();
-                actionCooldown = 8;
+                lookAtBlock(placeAt);
+                if (placeShelterBlock(placeAt, stack)) {
+                    shelterIndex++;
+                    actionCooldown = 8;
+                }
                 return;
             }
+
             state = State.SEARCHING;
             target = null;
+        }
+
+        private boolean placeShelterBlock(BlockPos placeAt, ItemStack stack) {
+            Block block = Block.byItem(stack.getItem());
+            if (block == Blocks.AIR || !level.getBlockState(placeAt).isAir()) return false;
+
+            // Use the server's normal player block-interaction pipeline, not setBlock().
+            for (Direction face : Direction.values()) {
+                BlockPos support = placeAt.relative(face.getOpposite());
+                BlockState supportState = level.getBlockState(support);
+                if (!supportState.isFaceSturdy(level, support, face)) continue;
+
+                Vec3 hitLocation = Vec3.atCenterOf(support).add(
+                        face.getStepX() * 0.499,
+                        face.getStepY() * 0.499,
+                        face.getStepZ() * 0.499
+                );
+                BlockHitResult sight = level.clip(new ClipContext(
+                        player.getEyePosition(), hitLocation,
+                        ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player
+                ));
+                if (sight.getType() != HitResult.Type.BLOCK || !sight.getBlockPos().equals(support)) continue;
+
+                BlockHitResult hit = new BlockHitResult(hitLocation, face, support, false);
+                player.gameMode.useItemOn(
+                        player, level, stack, net.minecraft.world.InteractionHand.MAIN_HAND, hit
+                );
+                if (level.getBlockState(placeAt).is(block)) {
+                    player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void handleNearbyPlayers() {

@@ -398,8 +398,12 @@ public final class CivilizationAI implements ModInitializer {
 
             convertLogsToPlanks();
             advanceCrafting();
-            manageFoodAndFarm(gameTick);
-            if (countPlanks() >= 17 && state != State.BUILDING) {
+            if (profession == Personality.Profession.FARMER
+                    || player.getFoodData().getFoodLevel() <= 12) {
+                manageFoodAndFarm(gameTick);
+            }
+            int shelterMaterialGoal = profession == Personality.Profession.BUILDER ? 17 : 21;
+            if (countPlanks() >= shelterMaterialGoal && state != State.BUILDING) {
                 BlockPos site = findShelterSite(personality.caution() > 0.7F ? 10 : 8);
                 if (site != null) {
                     state = State.BUILDING;
@@ -807,7 +811,10 @@ public final class CivilizationAI implements ModInitializer {
                 }
                 int amount = stack.getCount() * 4;
                 stack.shrink(stack.getCount());
-                player.getInventory().add(new ItemStack(plankItem, amount));
+                int sharedAmount = settlement == null ? 0 : amount / 4;
+                if (sharedAmount > 0) settlement.deposit("planks", sharedAmount);
+                int personalAmount = amount - sharedAmount;
+                if (personalAmount > 0) player.getInventory().add(new ItemStack(plankItem, personalAmount));
             }
         }
 
@@ -857,6 +864,11 @@ public final class CivilizationAI implements ModInitializer {
             if (!level.getBlockState(placeAt).isAir()) {
                 shelterIndex++;
                 return;
+            }
+
+            if (countPlanks() == 0 && settlement != null && settlement.stock("planks") > 0) {
+                int shared = settlement.withdraw("planks", Math.min(4, settlement.stock("planks")));
+                if (shared > 0) player.getInventory().add(new ItemStack(Items.OAK_PLANKS, shared));
             }
 
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {

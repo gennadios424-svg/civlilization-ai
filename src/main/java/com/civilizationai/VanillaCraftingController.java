@@ -37,15 +37,22 @@ public final class VanillaCraftingController {
     }
 
     private static void craftIfPossible(ServerPlayer player, ServerLevel level, boolean tableAvailable) {
-        // Starter progression is deliberately recipe-backed. Each pattern is
-        // submitted to the active datapack recipe manager, not granted directly.
-        tryPattern(player, level, 2, 2, new Item[]{
-                Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS
-        });
+        // Convert one log at a time through the live 1x1 vanilla recipe.
+        craftLogs(player, level);
 
-        tryPattern(player, level, 2, 2, new Item[]{
-                Items.OAK_PLANKS, null, Items.OAK_PLANKS, null
-        });
+        // Starter progression is recipe-backed. The recipe manager validates
+        // the grid and computes output and remainders before ingredients shrink.
+        if (count(player, Items.CRAFTING_TABLE) == 0 && !hasCraftingTableNearby(player, level, 12)) {
+            tryPattern(player, level, 2, 2, new Item[]{
+                    Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS
+            });
+        }
+
+        if (count(player, Items.STICK) < 2) {
+            tryPattern(player, level, 2, 2, new Item[]{
+                    Items.OAK_PLANKS, null, Items.OAK_PLANKS, null
+            });
+        }
 
         if (!tableAvailable) return;
 
@@ -69,6 +76,31 @@ public final class VanillaCraftingController {
                     null, Items.STICK, null,
                     null, Items.STICK, null
             });
+        }
+    }
+
+    private static void craftLogs(ServerPlayer player, ServerLevel level) {
+        for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+            ItemStack logStack = player.getInventory().getItem(slot);
+            if (logStack.isEmpty()) continue;
+            if (!net.minecraft.world.level.block.Block.byItem(logStack.getItem())
+                    .defaultBlockState().is(net.minecraft.tags.BlockTags.LOGS)) continue;
+
+            CraftingInput input = CraftingInput.of(1, 1, List.of(new ItemStack(logStack.getItem())));
+            Optional<RecipeHolder<CraftingRecipe>> match =
+                    level.getServer().getRecipeManager().getRecipeFor(RecipeType.CRAFTING, input, level);
+            if (match.isEmpty()) continue;
+            ItemStack output = match.get().value().assemble(input, level.registryAccess());
+            if (output.isEmpty() || !canFit(player, output)) return;
+
+            var remainders = level.getServer().getRecipeManager()
+                    .getRemainingItemsFor(RecipeType.CRAFTING, input, level);
+            logStack.shrink(1);
+            for (ItemStack remainder : remainders) {
+                if (!remainder.isEmpty()) player.getInventory().add(remainder.copy());
+            }
+            player.getInventory().add(output.copy());
+            player.inventoryMenu.broadcastChanges();
         }
     }
 

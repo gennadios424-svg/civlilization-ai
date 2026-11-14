@@ -33,7 +33,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 
-import static net.minecraft.commands.arguments.IntegerArgumentType.integer;
+import static com.mojang.brigadier.arguments.IntegerArgumentType.integer;
 
 public final class CivilizationAI implements ModInitializer {
     public static final String MOD_ID = "civilization_ai";

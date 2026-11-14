@@ -133,7 +133,6 @@ public final class VanillaCraftingController {
             ItemStack output = match.get().value().assemble(input, level.registryAccess());
             if (output.isEmpty() || !canFit(player, output)) return;
 
-            var remainders = match.get().value().getRecipeRemainders(input);
             logStack.shrink(1);
             player.getInventory().add(output.copy());
             player.inventoryMenu.broadcastChanges();
@@ -164,14 +163,8 @@ public final class VanillaCraftingController {
         ItemStack output = match.get().value().assemble(input, level.registryAccess());
         if (output.isEmpty() || !canFit(player, output)) return false;
 
-        var remainders = level.getServer().getRecipeManager()
-                .getRemainingItemsFor(RecipeType.CRAFTING, input, level);
-
         for (int slot : inventorySlots) {
             if (slot >= 0) player.getInventory().getItem(slot).shrink(1);
-        }
-        for (ItemStack remainder : remainders) {
-            if (!remainder.isEmpty()) player.getInventory().add(remainder.copy());
         }
         player.getInventory().add(output.copy());
         player.inventoryMenu.broadcastChanges();

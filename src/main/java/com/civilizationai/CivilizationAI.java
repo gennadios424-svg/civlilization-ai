@@ -643,10 +643,11 @@ public final class CivilizationAI implements ModInitializer {
                     if (x * x + z * z > radius * radius) continue;
                     for (int y = -3; y <= 5; y++) {
                         BlockPos pos = center.offset(x, y, z);
-                        if (!level.hasChunkAt(pos) || !hasClearLineOfSight(pos)) continue;
+                        if (!level.hasChunkAt(pos)) continue;
                         BlockState state = level.getBlockState(pos);
                         if (!(state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
                                 || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE))) continue;
+                        if (!hasClearLineOfSight(pos)) continue;
                         double distance = pos.distSqr(center);
                         if (distance < bestDistance) {
                             best = pos.immutable();

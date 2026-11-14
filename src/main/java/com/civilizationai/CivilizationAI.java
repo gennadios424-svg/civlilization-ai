@@ -13,6 +13,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+import net.minecraft.server.level.ServerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -136,9 +138,10 @@ public final class CivilizationAI implements ModInitializer {
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
         );
         // Explicitly send the player spawn packet so clients create the visible player model.
-        level.getServer().getPlayerList().broadcastAll(
-                new net.minecraft.network.protocol.game.ClientboundAddPlayerPacket(bot)
+        ServerEntity tracker = new ServerEntity(level, bot, 1, true, packet ->
+                level.getServer().getPlayerList().broadcastAll(packet)
         );
+        level.getServer().getPlayerList().broadcastAll(new ClientboundAddEntityPacket(bot, tracker));
         level.getServer().getPlayerList().broadcastSystemMessage(
                 Component.literal("<" + name + "> Hey! I'm exploring this world."),
                 false

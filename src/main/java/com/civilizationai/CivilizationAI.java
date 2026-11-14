@@ -23,6 +23,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.phys.Vec3;
@@ -253,6 +254,7 @@ public final class CivilizationAI implements ModInitializer {
         private int crouchTicks;
         private int socialCooldown;
         private BlockPos wanderTarget;
+        private int farmCooldown;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
@@ -263,6 +265,7 @@ public final class CivilizationAI implements ModInitializer {
             if (actionCooldown > 0) actionCooldown--;
             if (scanCooldown > 0) scanCooldown--;
             if (socialCooldown > 0) socialCooldown--;
+            if (farmCooldown > 0) farmCooldown--;
             if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
             handleNearbyPlayers();
 
@@ -312,11 +315,95 @@ public final class CivilizationAI implements ModInitializer {
             }
 
             convertLogsToPlanks();
+            advanceCrafting();
+            manageFoodAndFarm(gameTick);
             if (countPlanks() >= 16) {
                 state = State.BUILDING;
                 shelterOrigin = player.blockPosition().offset(3, 0, 0);
                 shelterIndex = 0;
                 target = null;
+            }
+        }
+
+
+        private int countItem(net.minecraft.world.item.Item item) {
+            int total = 0;
+            for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+                ItemStack stack = player.getInventory().getItem(i);
+                if (stack.is(item)) total += stack.getCount();
+            }
+            return total;
+        }
+
+        private boolean removeItems(net.minecraft.world.item.Item item, int amount) {
+            if (countItem(item) < amount) return false;
+            int remaining = amount;
+            for (int i = 0; i < player.getInventory().getContainerSize() && remaining > 0; i++) {
+                ItemStack stack = player.getInventory().getItem(i);
+                if (!stack.is(item)) continue;
+                int removed = Math.min(remaining, stack.getCount());
+                stack.shrink(removed);
+                remaining -= removed;
+            }
+            return remaining == 0;
+        }
+
+        private void advanceCrafting() {
+            if (countItem(Items.CRAFTING_TABLE) == 0 && countItem(Items.OAK_PLANKS) >= 4) {
+                removeItems(Items.OAK_PLANKS, 4);
+                player.getInventory().add(new ItemStack(Items.CRAFTING_TABLE));
+            }
+            if (countItem(Items.STICK) < 2 && countItem(Items.OAK_PLANKS) >= 2) {
+                removeItems(Items.OAK_PLANKS, 2);
+                player.getInventory().add(new ItemStack(Items.STICK, 4));
+            }
+            if (countItem(Items.WOODEN_PICKAXE) == 0
+                    && countItem(Items.OAK_PLANKS) >= 3 && countItem(Items.STICK) >= 2) {
+                removeItems(Items.OAK_PLANKS, 3);
+                removeItems(Items.STICK, 2);
+                player.getInventory().add(new ItemStack(Items.WOODEN_PICKAXE));
+            }
+        }
+
+        private void manageFoodAndFarm(int gameTick) {
+            if (gameTick % 40 != 0 || farmCooldown > 0) return;
+            farmCooldown = 40;
+            for (BlockPos pos : BlockPos.betweenClosed(
+                    player.blockPosition().offset(-8, -2, -8),
+                    player.blockPosition().offset(8, 2, 8))) {
+                BlockState cropState = level.getBlockState(pos);
+                if (cropState.getBlock() instanceof CropBlock crop
+                        && cropState.getValue(CropBlock.AGE) >= crop.getMaxAge()) {
+                    level.destroyBlock(pos, false, player);
+                    player.getInventory().add(new ItemStack(Items.WHEAT));
+                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                    break;
+                }
+            }
+            if (countItem(Items.WHEAT_SEEDS) > 0) {
+                BlockPos base = player.blockPosition();
+                for (int dx = -3; dx <= 3; dx++) {
+                    for (int dz = -3; dz <= 3; dz++) {
+                        BlockPos soil = base.offset(dx, -1, dz);
+                        BlockPos cropPos = soil.above();
+                        if (level.getBlockState(cropPos).isAir()
+                                && (level.getBlockState(soil).is(Blocks.DIRT)
+                                || level.getBlockState(soil).is(Blocks.GRASS_BLOCK))) {
+                            level.setBlock(soil, Blocks.FARMLAND.defaultBlockState(), 3);
+                            level.setBlock(cropPos, Blocks.WHEAT.defaultBlockState(), 3);
+                            removeItems(Items.WHEAT_SEEDS, 1);
+                            return;
+                        }
+                    }
+                }
+            }
+            if (countItem(Items.WHEAT) >= 3) {
+                removeItems(Items.WHEAT, 3);
+                player.getInventory().add(new ItemStack(Items.BREAD));
+            }
+            if (player.getFoodData().getFoodLevel() <= 14 && countItem(Items.BREAD) > 0) {
+                removeItems(Items.BREAD, 1);
+                player.getFoodData().setFoodLevel(Math.min(20, player.getFoodData().getFoodLevel() + 5));
             }
         }
 
@@ -353,9 +440,7 @@ public final class CivilizationAI implements ModInitializer {
                         BlockPos pos = center.offset(x, y, z);
                         if (!level.hasChunkAt(pos)) continue;
                         BlockState state = level.getBlockState(pos);
-                        boolean easy = state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK)
-                                || state.is(Blocks.SAND) || state.is(Blocks.GRAVEL)
-                                || state.is(BlockTags.LEAVES);
+                        boolean easy = false; // Do not mine random terrain blocks.
                         if (easy && state.getDestroySpeed(level, pos) >= 0) {
                             double distance = pos.distSqr(center);
                             if (distance < bestDistance) {
@@ -403,9 +488,10 @@ public final class CivilizationAI implements ModInitializer {
             if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
             Block itemBlock = state.getBlock();
             player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-            if (level.destroyBlock(target, true, player)) {
+            if (level.destroyBlock(target, false, player)) {
                 ItemStack collected = new ItemStack(itemBlock.asItem());
                 if (!collected.isEmpty()) player.getInventory().add(collected);
+                if (RANDOM.nextInt(8) == 0 && countItem(Items.WHEAT_SEEDS) < 16) player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
                 level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.literal("<" + player.getGameProfile().getName() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
                         false

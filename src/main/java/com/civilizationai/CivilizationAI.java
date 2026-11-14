@@ -82,7 +82,10 @@ public final class CivilizationAI implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(server ->
                 LOGGER.info("[Civilization AI] Ready. Use /civai spawn <1-100> to create AI players.")
         );
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> BOTS.clear());
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            BOTS.clear();
+            SETTLEMENTS.clear();
+        });
     }
 
     private static int spawnCommand(CommandSourceStack source, int count) {
@@ -115,7 +118,12 @@ public final class CivilizationAI implements ModInitializer {
                 source.sendSuccess(() -> Component.literal("...and " + (BOTS.size() - 20) + " more."), false);
                 break;
             }
-            source.sendSuccess(() -> Component.literal("- " + brain.player.getGameProfile().name() + " (" + brain.state + ")"), false);
+            source.sendSuccess(() -> Component.literal(
+                    "- " + brain.player.getGameProfile().name()
+                            + " | " + brain.profession
+                            + " | " + brain.state
+                            + (brain.settlement == null ? " | Unsettled" : " | " + brain.settlement.name())
+            ), false);
         }
         return BOTS.size();
     }

@@ -214,7 +214,8 @@ public final class CivilizationAI implements ModInitializer {
                     if (stack.isEmpty() || Block.byItem(stack.getItem()) == Blocks.AIR) continue;
                     ItemStack transfer = stack.copy();
                     transfer.setCount(Math.min(8, stack.getCount()));
-                    if (leader.player.getInventory().add(transfer)) stack.shrink(transfer.getCount());
+                    int moved = transfer.getCount();
+                    if (leader.player.getInventory().add(transfer)) stack.shrink(moved);
                     break;
                 }
             }

@@ -841,9 +841,16 @@ public final class CivilizationAI implements ModInitializer {
             double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
             float yaw = (float) (Math.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
             float pitch = (float) (-Math.atan2(delta.y, horizontal) * (180.0 / Math.PI));
-            player.setYRot(yaw);
-            player.setYHeadRot(yaw);
-            player.setXRot(pitch);
+            float yawDelta = net.minecraft.util.Mth.wrapDegrees(yaw - player.getYRot());
+            float newYaw = player.getYRot()
+                    + net.minecraft.util.Mth.clamp(yawDelta, -12.0F, 12.0F);
+            float pitchDelta = pitch - player.getXRot();
+            float newPitch = player.getXRot()
+                    + net.minecraft.util.Mth.clamp(pitchDelta, -8.0F, 8.0F);
+            player.setYRot(newYaw);
+            player.setYHeadRot(newYaw);
+            player.yBodyRot = newYaw;
+            player.setXRot(newPitch);
         }
 
         private void convertLogsToPlanks() {

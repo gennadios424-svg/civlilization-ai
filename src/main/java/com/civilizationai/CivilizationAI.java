@@ -214,6 +214,8 @@ public final class CivilizationAI implements ModInitializer {
         private int shelterIndex;
         private BlockPos shelterOrigin;
         private State state = State.SEARCHING;
+        private int crouchTicks;
+        private int socialCooldown;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
@@ -223,6 +225,9 @@ public final class CivilizationAI implements ModInitializer {
         private void tick(int gameTick) {
             if (actionCooldown > 0) actionCooldown--;
             if (scanCooldown > 0) scanCooldown--;
+            if (socialCooldown > 0) socialCooldown--;
+            if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
+            handleNearbyPlayers();
 
             if (state == State.BUILDING) {
                 buildShelter();
@@ -243,7 +248,7 @@ public final class CivilizationAI implements ModInitializer {
             }
 
             if (target != null) {
-                if (player.blockPosition().distSqr(target) <= 5) {
+                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 2.25) {
                     if (actionCooldown == 0) {
                         gatherTarget();
                         actionCooldown = 12;
@@ -271,7 +276,7 @@ public final class CivilizationAI implements ModInitializer {
             for (int x = -radius; x <= radius; x += 2) {
                 for (int z = -radius; z <= radius; z += 2) {
                     if (x * x + z * z > radius * radius) continue;
-                    for (int y = -3; y <= 12; y++) {
+                    for (int y = -4; y <= 16; y++) {
                         BlockPos pos = center.offset(x, y, z);
                         if (!level.hasChunkAt(pos)) continue;
                         if (level.getBlockState(pos).is(BlockTags.LOGS)) {
@@ -320,12 +325,19 @@ public final class CivilizationAI implements ModInitializer {
             double distance = direction.length();
             if (distance < 0.05) return;
             // Small per-tick steps avoid visible position jumps from coarse 5-tick updates.
-            Vec3 step = direction.normalize().scale(Math.min(0.018, distance));
+            Vec3 step = direction.normalize().scale(Math.min(0.055, distance));
             float desiredYaw = (float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI));
             float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
-            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -4.0F, 4.0F));
+            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -2.5F, 2.5F));
             player.yBodyRot = player.getYRot();
-            player.move(MoverType.SELF, step);
+            Vec3 velocity = player.getDeltaMovement();
+            double vertical = Math.max(-0.35, velocity.y - 0.08);
+            if (!level.noCollision(player, player.getBoundingBox().move(step.x, 0, step.z))) {
+                step = Vec3.ZERO;
+                if (player.onGround()) player.jumpFromGround();
+            }
+            player.move(MoverType.SELF, new Vec3(step.x, vertical, step.z));
+            player.setDeltaMovement(step.x * 0.65, player.getDeltaMovement().y, step.z * 0.65);
         }
 
         private void gatherTarget() {
@@ -333,7 +345,8 @@ public final class CivilizationAI implements ModInitializer {
             BlockState state = level.getBlockState(target);
             if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
             Block itemBlock = state.getBlock();
-            if (level.destroyBlock(target, false, player)) {
+            player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+            if (level.destroyBlock(target, true, player)) {
                 ItemStack collected = new ItemStack(itemBlock.asItem());
                 if (!collected.isEmpty()) player.getInventory().add(collected);
                 level.getServer().getPlayerList().broadcastSystemMessage(
@@ -378,12 +391,44 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
                 if (block == Blocks.AIR) continue;
+                if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
+                    walkToward(placeAt);
+                    shelterIndex--;
+                    return;
+                }
+                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
                 level.setBlock(placeAt, block.defaultBlockState(), 3);
                 stack.shrink(1);
                 return;
             }
             state = State.GATHERING;
             target = findNearestEasyBlock(16);
+        }
+
+        private void handleNearbyPlayers() {
+            if (socialCooldown > 0) return;
+            for (ServerPlayer nearby : level.players()) {
+                if (nearby == player || nearby.isRemoved() || nearby.distanceToSqr(player) > 25.0) continue;
+                Vec3 delta = nearby.getEyePosition().subtract(player.getEyePosition());
+                double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+                if (horizontal > 0.001) {
+                    float yaw = (float) (Math.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
+                    float pitch = (float) (-Math.atan2(delta.y, horizontal) * (180.0 / Math.PI));
+                    player.setYRot(yaw);
+                    player.setXRot(pitch);
+                    player.setYHeadRot(yaw);
+                }
+                crouchTicks = 24;
+                player.setShiftKeyDown(true);
+                if (nearby.isShiftKeyDown()) {
+                    level.getServer().getPlayerList().broadcastSystemMessage(
+                            Component.literal(player.getGameProfile().getName() + " and " + nearby.getGameProfile().getName() + " are teaming up!"),
+                            false
+                    );
+                }
+                socialCooldown = 100;
+                break;
+            }
         }
 
         private void lookAround(int gameTick) {

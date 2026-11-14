@@ -498,25 +498,47 @@ public final class CivilizationAI implements ModInitializer {
             Vec3 targetPoint = Vec3.atBottomCenterOf(destination);
             Vec3 direction = new Vec3(targetPoint.x - current.x, 0, targetPoint.z - current.z);
             double distance = direction.length();
-            if (distance < 0.05) return;
-            // Small per-tick steps avoid visible position jumps from coarse 5-tick updates.
-            Vec3 step = direction.normalize().scale(Math.min(0.075, distance));
-            float desiredYaw = (float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI));
-            float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
-            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -2.5F, 2.5F));
-            player.yBodyRot = player.getYRot();
             Vec3 velocity = player.getDeltaMovement();
-            double gravity = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
-            Vec3 motion = new Vec3(step.x, gravity, step.z);
-            if (!level.noCollision(player, player.getBoundingBox().move(step.x, 0, step.z))) {
-                if (player.onGround() && level.noCollision(player, player.getBoundingBox().move(step.x, 1.0, step.z))) {
-                    player.jumpFromGround();
-                    motion = new Vec3(step.x, 0.42, step.z);
-                } else motion = new Vec3(0, gravity, 0);
+            if (distance < 0.15) {
+                player.setSprinting(false);
+                player.setDeltaMovement(velocity.x * 0.45, velocity.y, velocity.z * 0.45);
+                return;
             }
+
+            Vec3 desired = direction.normalize().scale(Math.min(0.11, distance * 0.16));
+            float desiredYaw = (float) (Math.atan2(-desired.x, desired.z) * (180.0 / Math.PI));
+            float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
+            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -4.0F, 4.0F));
+            player.yBodyRot = player.getYRot();
+
+            // Accelerate and decelerate horizontally rather than teleporting by fixed offsets.
+            Vec3 horizontal = new Vec3(
+                    velocity.x * 0.65 + desired.x * 0.35,
+                    0,
+                    velocity.z * 0.65 + desired.z * 0.35
+            );
+            double gravity = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
+            Vec3 motion = new Vec3(horizontal.x, gravity, horizontal.z);
+
+            if (!level.noCollision(player, player.getBoundingBox().move(horizontal))) {
+                Vec3 left = new Vec3(-desired.z, 0, desired.x).scale(0.10);
+                Vec3 right = new Vec3(desired.z, 0, -desired.x).scale(0.10);
+                if (level.noCollision(player, player.getBoundingBox().move(left))) {
+                    motion = new Vec3(left.x, gravity, left.z);
+                } else if (level.noCollision(player, player.getBoundingBox().move(right))) {
+                    motion = new Vec3(right.x, gravity, right.z);
+                } else if (player.onGround()
+                        && level.noCollision(player, player.getBoundingBox().move(horizontal.x, 1.0, horizontal.z))) {
+                    player.jumpFromGround();
+                    motion = new Vec3(horizontal.x, 0.42, horizontal.z);
+                } else {
+                    motion = new Vec3(0, gravity, 0);
+                }
+            }
+
             player.move(MoverType.SELF, motion);
             player.setDeltaMovement(motion);
-            player.setSprinting(true);
+            player.setSprinting(distance > 1.0 && player.onGround());
         }
 
         private boolean gatherTarget() {

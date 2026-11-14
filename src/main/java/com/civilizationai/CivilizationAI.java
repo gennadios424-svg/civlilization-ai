@@ -1,6 +1,7 @@
 package com.civilizationai;
 
 import com.mojang.authlib.GameProfile;
+import com.mojang.logging.LogUtils;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.FakePlayer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -17,6 +18,7 @@ import java.util.UUID;
 
 public final class CivilizationAI implements ModInitializer {
     public static final String MOD_ID = "civilization_ai";
+    private static final org.slf4j.Logger LOGGER = LogUtils.getLogger();
     private static final String FIRST_BOT_NAME = "CivBot_001";
 
     @Override
@@ -58,6 +60,6 @@ public final class CivilizationAI implements ModInitializer {
                 false
         );
 
-        server.getLogger().info("[Civilization AI] Spawned {}", FIRST_BOT_NAME);
+        LOGGER.info("[Civilization AI] Spawned {}", FIRST_BOT_NAME);
     }
 }

@@ -50,7 +50,8 @@ public final class GroundPathfinder {
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dz == 0) continue;
-                    for (int dy = 1; dy >= -1; dy--) {
+                    // Permit small natural drops while still requiring a safe landing surface.
+                    for (int dy = 1; dy >= -3; dy--) {
                         BlockPos next = current.offset(dx, dy, dz);
                         if (closed.contains(next) || !isWalkable(level, next)) continue;
 
@@ -60,7 +61,7 @@ public final class GroundPathfinder {
                                 || !isWalkable(level, current.offset(0, dy, dz)))) continue;
 
                         double step = (dx != 0 && dz != 0 ? 1.414 : 1.0)
-                                + (dy > 0 ? 1.2 : dy < 0 ? 0.65 : 0.0);
+                                + (dy > 0 ? 1.2 : dy < 0 ? 0.65 + Math.abs(dy) * 0.45 : 0.0);
                         double candidate = costs.get(current) + step;
                         if (candidate >= costs.getOrDefault(next, Double.POSITIVE_INFINITY)) continue;
 

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "civilization_ai",
+  "version": "${version}",
+  "name": "Civilization AI",
+  "description": "Autonomous player-like characters that build civilizations and form factions.",
+  "authors": ["gennadios424-svg"],
+  "license": "All-Rights-Reserved",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.civilizationai.CivilizationAI"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

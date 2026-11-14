@@ -730,9 +730,7 @@ public final class CivilizationAI implements ModInitializer {
             }
 
             if (navigationPath.isEmpty()) {
-                Vec3 velocity = player.getDeltaMovement();
-                player.setDeltaMovement(velocity.x * 0.35, velocity.y, velocity.z * 0.35);
-                player.setSprinting(false);
+                MovementController.stop(player);
                 return;
             }
 
@@ -745,38 +743,22 @@ public final class CivilizationAI implements ModInitializer {
             double distance = offset.length();
             if (distance < 0.05) return;
 
-            Vec3 desired = offset.normalize().scale(Math.min(0.105, distance * 0.18));
-            float desiredYaw = (float) (Math.atan2(-desired.x, desired.z) * (180.0 / Math.PI));
-            float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
-            player.setYRot(player.getYRot()
-                    + net.minecraft.util.Mth.clamp(yawDelta, -5.0F, 5.0F));
-            player.setYHeadRot(player.getYRot());
-            player.yBodyRot = player.getYRot();
+            Vec3 direction = offset.normalize();
+            MovementController.face(player, new Vec3(
+                    waypoint.getX() + 0.5,
+                    waypoint.getY() + 0.1,
+                    waypoint.getZ() + 0.5
+            ));
 
-            Vec3 velocity = player.getDeltaMovement();
-            Vec3 horizontal = new Vec3(
-                    velocity.x * 0.62 + desired.x * 0.38,
-                    0,
-                    velocity.z * 0.62 + desired.z * 0.38
-            );
-            double vertical = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
-
+            // Jump only for a path waypoint one block above the current feet position.
+            // Gravity, falling and collision response are handled by vanilla entity ticking.
             if (waypoint.getY() > player.blockPosition().getY() && player.onGround()) {
                 player.jumpFromGround();
-                vertical = 0.42;
             }
 
-            Vec3 motion = new Vec3(horizontal.x, vertical, horizontal.z);
-            if (!level.noCollision(player, player.getBoundingBox().move(horizontal))) {
-                navigationPath.clear();
-                pathRecalculationCooldown = 0;
-                player.setDeltaMovement(0, vertical, 0);
-                return;
-            }
-
-            player.move(MoverType.SELF, motion);
-            player.setDeltaMovement(motion);
-            player.setSprinting(distance > 3.0 && player.onGround());
+            // Do not integrate coordinates here. Supply horizontal velocity intent and
+            // let Minecraft perform the actual move, gravity and collision resolution.
+            MovementController.moveToward(player, direction, distance > 3.0 && player.onGround());
         }
 
         private boolean gatherTarget() {
@@ -883,20 +865,7 @@ public final class CivilizationAI implements ModInitializer {
         }
 
         private void lookAtBlock(BlockPos pos) {
-            Vec3 delta = Vec3.atCenterOf(pos).subtract(player.getEyePosition());
-            double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
-            float yaw = (float) (Math.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
-            float pitch = (float) (-Math.atan2(delta.y, horizontal) * (180.0 / Math.PI));
-            float yawDelta = net.minecraft.util.Mth.wrapDegrees(yaw - player.getYRot());
-            float newYaw = player.getYRot()
-                    + net.minecraft.util.Mth.clamp(yawDelta, -12.0F, 12.0F);
-            float pitchDelta = pitch - player.getXRot();
-            float newPitch = player.getXRot()
-                    + net.minecraft.util.Mth.clamp(pitchDelta, -8.0F, 8.0F);
-            player.setYRot(newYaw);
-            player.setYHeadRot(newYaw);
-            player.yBodyRot = newYaw;
-            player.setXRot(newPitch);
+            MovementController.face(player, Vec3.atCenterOf(pos));
         }
 
         private void convertLogsToPlanks() {

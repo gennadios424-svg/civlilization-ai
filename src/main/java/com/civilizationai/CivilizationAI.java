@@ -11,9 +11,9 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.nbt.NbtOps;
-import net.minecraft.nbt.Tag;
-import net.minecraft.nbt.TagParser;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.server.MinecraftServer;
@@ -252,7 +252,7 @@ public final class CivilizationAI implements ModInitializer {
             data.put(prefix + "shelterIndex", Integer.toString(brain.shelterIndex));
             data.put(prefix + "settlementName", brain.settlement == null ? null : brain.settlement.name());
             data.put(prefix + "settlementCenter", brain.settlement == null ? "" : encodePos(brain.settlement.center()));
-            var registryOps = server.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+            var registryOps = server.registryAccess().createSerializationContext(JsonOps.INSTANCE);
             for (int slot = 0; slot < brain.player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = brain.player.getInventory().getItem(slot);
                 String inventoryKey = prefix + "inventory." + slot;
@@ -321,9 +321,9 @@ public final class CivilizationAI implements ModInitializer {
                         String encoded = saved.get(prefix + "inventory." + slot);
                         if (encoded == null || encoded.isBlank()) continue;
                         try {
-                            Tag tag = TagParser.parseTag(encoded);
+                            JsonElement json = JsonParser.parseString(encoded);
                             int inventorySlot = slot;
-                            ItemStack.CODEC.parse(registryOps, tag).result()
+                            ItemStack.CODEC.parse(registryOps, json).result()
                                     .ifPresent(stack -> restored.getInventory().setItem(inventorySlot, stack));
                         } catch (Exception invalidStack) {
                             LOGGER.warn("[Civilization AI] Skipped invalid saved inventory stack for {} slot {}", id, slot);

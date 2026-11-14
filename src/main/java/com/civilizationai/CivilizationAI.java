@@ -189,32 +189,41 @@ public final class CivilizationAI implements ModInitializer {
     private static void coordinateTeams() {
         List<BotBrain> active = new ArrayList<>(BOTS.values());
         for (int i = 0; i < active.size(); i++) {
-            BotBrain leader = active.get(i);
-            if (leader.player.isRemoved()) continue;
+            BotBrain first = active.get(i);
+            if (first.player.isRemoved()) continue;
             for (int j = i + 1; j < active.size(); j++) {
-                BotBrain member = active.get(j);
-                if (member.player.isRemoved() || member.level != leader.level) continue;
-                if (leader.player.distanceToSqr(member.player) > 36.0) continue;
+                BotBrain second = active.get(j);
+                if (second.player.isRemoved() || second.level != first.level) continue;
+                double distance = first.player.distanceToSqr(second.player);
+                if (distance > 36.0) continue;
 
-                Vec3 towardMember = member.player.getEyePosition().subtract(leader.player.getEyePosition());
-                float leaderYaw = (float) (Math.atan2(-towardMember.x, towardMember.z) * (180.0 / Math.PI));
-                leader.player.setYRot(leaderYaw);
-                leader.player.setYHeadRot(leaderYaw);
-                leader.player.yBodyRot = leaderYaw;
-                leader.player.setShiftKeyDown(true);
-                member.player.setShiftKeyDown(true);
-                leader.crouchTicks = Math.max(leader.crouchTicks, 20);
-                member.crouchTicks = Math.max(member.crouchTicks, 20);
+                UUID firstId = second.player.getUUID();
+                UUID secondId = first.player.getUUID();
+                int bond = Math.min(100, first.relationships.getOrDefault(firstId, 0) + 1);
+                first.relationships.put(firstId, bond);
+                second.relationships.put(secondId, bond);
 
-                // Share spare building blocks so the pair can contribute to one shelter.
-                for (int slot = 0; slot < member.player.getInventory().getContainerSize(); slot++) {
-                    ItemStack stack = member.player.getInventory().getItem(slot);
-                    if (stack.isEmpty() || Block.byItem(stack.getItem()) == Blocks.AIR) continue;
-                    ItemStack transfer = stack.copy();
-                    transfer.setCount(Math.min(8, stack.getCount()));
-                    int moved = transfer.getCount();
-                    if (leader.player.getInventory().add(transfer)) stack.shrink(moved);
-                    break;
+                // Friendship gestures are occasional and only happen when neither bot is busy.
+                if (bond >= 40 && first.friendshipGestureCooldown == 0
+                        && second.friendshipGestureCooldown == 0
+                        && first.target == null && second.target == null
+                        && first.state != State.BUILDING && second.state != State.BUILDING) {
+                    Vec3 towardSecond = second.player.getEyePosition().subtract(first.player.getEyePosition());
+                    float firstYaw = (float) (Math.atan2(-towardSecond.x, towardSecond.z) * (180.0 / Math.PI));
+                    first.player.setYRot(firstYaw);
+                    first.player.setYHeadRot(firstYaw);
+                    first.player.yBodyRot = firstYaw;
+
+                    Vec3 towardFirst = first.player.getEyePosition().subtract(second.player.getEyePosition());
+                    float secondYaw = (float) (Math.atan2(-towardFirst.x, towardFirst.z) * (180.0 / Math.PI));
+                    second.player.setYRot(secondYaw);
+                    second.player.setYHeadRot(secondYaw);
+                    second.player.yBodyRot = secondYaw;
+
+                    first.crouchTicks = 16;
+                    second.crouchTicks = 16;
+                    first.friendshipGestureCooldown = 240;
+                    second.friendshipGestureCooldown = 240;
                 }
             }
         }
@@ -249,6 +258,8 @@ public final class CivilizationAI implements ModInitializer {
         private State state = State.SEARCHING;
         private int crouchTicks;
         private int socialCooldown;
+        private int friendshipGestureCooldown;
+        private final Map<UUID, Integer> relationships = new HashMap<>();
         private BlockPos wanderTarget;
         private int farmCooldown;
         private BlockPos miningTarget;
@@ -263,6 +274,7 @@ public final class CivilizationAI implements ModInitializer {
             if (actionCooldown > 0) actionCooldown--;
             if (scanCooldown > 0) scanCooldown--;
             if (socialCooldown > 0) socialCooldown--;
+            if (friendshipGestureCooldown > 0) friendshipGestureCooldown--;
             if (farmCooldown > 0) farmCooldown--;
             if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
             handleNearbyPlayers();

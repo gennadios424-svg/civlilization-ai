@@ -56,6 +56,7 @@ public final class CivilizationAI implements ModInitializer {
     };
 
     private static final Map<UUID, BotBrain> BOTS = new HashMap<>();
+    private static final Map<UUID, Settlement> SETTLEMENTS = new HashMap<>();
     private static final List<BlockPos> SHELTER_LAYOUT = createShelterLayout();
 
     @Override
@@ -140,12 +141,13 @@ public final class CivilizationAI implements ModInitializer {
         level.getServer().getPlayerList().broadcastAll(
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
         );
+        BotBrain brain = new BotBrain(bot, level);
+        BOTS.put(uuid, brain);
         level.getServer().getPlayerList().broadcastSystemMessage(
-                Component.literal("<" + name + "> Hey! I'm exploring this world."),
+                Component.literal("<" + name + "> " + brain.personality.greeting()),
                 false
         );
-
-        BOTS.put(uuid, new BotBrain(bot, level));
+        assignNearestSettlement(brain);
         LOGGER.info("[Civilization AI] Spawned {}", name);
         return bot;
     }
@@ -199,12 +201,25 @@ public final class CivilizationAI implements ModInitializer {
 
                 UUID firstId = second.player.getUUID();
                 UUID secondId = first.player.getUUID();
-                int bond = Math.min(100, first.relationships.getOrDefault(firstId, 0) + 1);
+                int bondGain = Math.max(1, Math.round(
+                        first.personality.sociability() + second.personality.sociability()
+                                + first.personality.cooperation() * 0.5F
+                ));
+                int bond = Math.min(100, first.relationships.getOrDefault(firstId, 0) + bondGain);
                 first.relationships.put(firstId, bond);
                 second.relationships.put(secondId, bond);
+                if (first.settlement != null && second.settlement == null) {
+                    first.settlement.addMember(second.player.getUUID(), second.profession);
+                    second.settlement = first.settlement;
+                } else if (second.settlement != null && first.settlement == null) {
+                    second.settlement.addMember(first.player.getUUID(), first.profession);
+                    first.settlement = second.settlement;
+                }
 
                 // Friendship gestures are occasional and only happen when neither bot is busy.
-                if (bond >= 40 && first.friendshipGestureCooldown == 0
+                if (bond >= 40 && first.personality.sociability() > 0.55F
+                        && second.personality.sociability() > 0.55F
+                        && first.friendshipGestureCooldown == 0
                         && second.friendshipGestureCooldown == 0
                         && first.target == null && second.target == null
                         && first.state != State.BUILDING && second.state != State.BUILDING) {
@@ -225,6 +240,54 @@ public final class CivilizationAI implements ModInitializer {
                     first.friendshipGestureCooldown = 240;
                     second.friendshipGestureCooldown = 240;
                 }
+            }
+        }
+    }
+
+    private static void assignNearestSettlement(BotBrain brain) {
+        Settlement closest = null;
+        double bestDistance = 48.0 * 48.0;
+        for (Settlement settlement : SETTLEMENTS.values()) {
+            if (settlement.level() != brain.level) continue;
+            double distance = settlement.center().distSqr(brain.player.blockPosition());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                closest = settlement;
+            }
+        }
+        if (closest != null) {
+            closest.addMember(brain.player.getUUID(), brain.profession);
+            brain.settlement = closest;
+        }
+    }
+
+    private static void registerSettlement(BotBrain founder, BlockPos center) {
+        Settlement settlement = null;
+        for (Settlement candidate : SETTLEMENTS.values()) {
+            if (candidate.level() == founder.level
+                    && candidate.center().distSqr(center) <= 48 * 48) {
+                settlement = candidate;
+                break;
+            }
+        }
+        if (settlement == null) {
+            String[] names = {"Oakridge", "Riverstead", "Stonehaven", "Pinewatch", "Meadowbrook", "Ashford"};
+            String name = names[RANDOM.nextInt(names.length)];
+            settlement = new Settlement(name, founder.level, center);
+            SETTLEMENTS.put(settlement.id(), settlement);
+            founder.level.getServer().getPlayerList().broadcastSystemMessage(
+                    Component.literal("A new settlement has been founded: " + name + "!"),
+                    false
+            );
+        }
+        settlement.addMember(founder.player.getUUID(), founder.profession);
+        founder.settlement = settlement;
+        settlement.moveCenter(center);
+        for (BotBrain citizen : BOTS.values()) {
+            if (citizen == founder || citizen.level != founder.level) continue;
+            if (citizen.player.blockPosition().distSqr(center) <= 48 * 48) {
+                settlement.addMember(citizen.player.getUUID(), citizen.profession);
+                citizen.settlement = settlement;
             }
         }
     }
@@ -264,6 +327,9 @@ public final class CivilizationAI implements ModInitializer {
         private int farmCooldown;
         private BlockPos miningTarget;
         private int miningProgress;
+        private final Personality personality = Personality.random(RANDOM);
+        private final Personality.Profession profession = personality.preferredProfession();
+        private Settlement settlement;
         private List<BlockPos> navigationPath = new ArrayList<>();
         private BlockPos pathDestination;
         private int pathRecalculationCooldown;
@@ -289,14 +355,16 @@ public final class CivilizationAI implements ModInitializer {
 
             if (target == null || scanCooldown == 0) {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
-                    target = findNearestTreeLog(50);
+                    int searchRadius = personality.curiosity() > 0.65F ? 32 : 20;
+                    target = findNearestTreeLog(searchRadius);
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
                         target = null;
                         state = State.EXPLORING;
                         if (wanderTarget == null || player.blockPosition().distSqr(wanderTarget) < 9) {
-                            int dx = RANDOM.nextInt(61) - 30;
-                            int dz = RANDOM.nextInt(61) - 30;
+                            int wanderRadius = 12 + Math.round(personality.curiosity() * 24);
+                            int dx = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
+                            int dz = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
                             wanderTarget = player.blockPosition().offset(dx, 0, dz);
                         }
                     } else {
@@ -332,7 +400,7 @@ public final class CivilizationAI implements ModInitializer {
             advanceCrafting();
             manageFoodAndFarm(gameTick);
             if (countPlanks() >= 17 && state != State.BUILDING) {
-                BlockPos site = findShelterSite(8);
+                BlockPos site = findShelterSite(personality.caution() > 0.7F ? 10 : 8);
                 if (site != null) {
                     state = State.BUILDING;
                     shelterOrigin = site;
@@ -677,9 +745,39 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
                 if (!block.defaultBlockState().is(BlockTags.LOGS)) continue;
+
+                net.minecraft.world.item.Item plankItem = Items.OAK_PLANKS;
+                if (block == Blocks.SPRUCE_LOG || block == Blocks.SPRUCE_WOOD
+                        || block == Blocks.STRIPPED_SPRUCE_LOG || block == Blocks.STRIPPED_SPRUCE_WOOD) {
+                    plankItem = Items.SPRUCE_PLANKS;
+                } else if (block == Blocks.BIRCH_LOG || block == Blocks.BIRCH_WOOD
+                        || block == Blocks.STRIPPED_BIRCH_LOG || block == Blocks.STRIPPED_BIRCH_WOOD) {
+                    plankItem = Items.BIRCH_PLANKS;
+                } else if (block == Blocks.JUNGLE_LOG || block == Blocks.JUNGLE_WOOD
+                        || block == Blocks.STRIPPED_JUNGLE_LOG || block == Blocks.STRIPPED_JUNGLE_WOOD) {
+                    plankItem = Items.JUNGLE_PLANKS;
+                } else if (block == Blocks.ACACIA_LOG || block == Blocks.ACACIA_WOOD
+                        || block == Blocks.STRIPPED_ACACIA_LOG || block == Blocks.STRIPPED_ACACIA_WOOD) {
+                    plankItem = Items.ACACIA_PLANKS;
+                } else if (block == Blocks.DARK_OAK_LOG || block == Blocks.DARK_OAK_WOOD
+                        || block == Blocks.STRIPPED_DARK_OAK_LOG || block == Blocks.STRIPPED_DARK_OAK_WOOD) {
+                    plankItem = Items.DARK_OAK_PLANKS;
+                } else if (block == Blocks.MANGROVE_LOG || block == Blocks.MANGROVE_WOOD
+                        || block == Blocks.STRIPPED_MANGROVE_LOG || block == Blocks.STRIPPED_MANGROVE_WOOD) {
+                    plankItem = Items.MANGROVE_PLANKS;
+                } else if (block == Blocks.CHERRY_LOG || block == Blocks.CHERRY_WOOD
+                        || block == Blocks.STRIPPED_CHERRY_LOG || block == Blocks.STRIPPED_CHERRY_WOOD) {
+                    plankItem = Items.CHERRY_PLANKS;
+                } else if (block == Blocks.CRIMSON_STEM || block == Blocks.CRIMSON_HYPHAE
+                        || block == Blocks.STRIPPED_CRIMSON_STEM || block == Blocks.STRIPPED_CRIMSON_HYPHAE) {
+                    plankItem = Items.CRIMSON_PLANKS;
+                } else if (block == Blocks.WARPED_STEM || block == Blocks.WARPED_HYPHAE
+                        || block == Blocks.STRIPPED_WARPED_STEM || block == Blocks.STRIPPED_WARPED_HYPHAE) {
+                    plankItem = Items.WARPED_PLANKS;
+                }
                 int amount = stack.getCount() * 4;
                 stack.shrink(stack.getCount());
-                player.getInventory().add(new ItemStack(Items.OAK_PLANKS, amount));
+                player.getInventory().add(new ItemStack(plankItem, amount));
             }
         }
 
@@ -713,8 +811,9 @@ public final class CivilizationAI implements ModInitializer {
                 shelterOrigin = null;
                 target = null;
                 player.setSprinting(false);
+                registerSettlement(this, shelterOrigin);
                 level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().name() + "> Shelter built! This place is ours. Time to explore."),
+                        Component.literal("<" + player.getGameProfile().name() + "> Our shelter is ready. Welcome to " + settlement.name() + "!"),
                         false
                 );
                 return;

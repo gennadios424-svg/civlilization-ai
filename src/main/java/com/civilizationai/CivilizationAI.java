@@ -252,6 +252,7 @@ public final class CivilizationAI implements ModInitializer {
         private State state = State.SEARCHING;
         private int crouchTicks;
         private int socialCooldown;
+        private BlockPos wanderTarget;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
@@ -266,7 +267,7 @@ public final class CivilizationAI implements ModInitializer {
             handleNearbyPlayers();
 
             if (state == State.BUILDING) {
-                buildShelter();
+                buildShelter(gameTick);
                 return;
             }
 
@@ -275,7 +276,12 @@ public final class CivilizationAI implements ModInitializer {
                     target = findNearestTreeLog(50);
                     if (target == null) {
                         target = null;
-                        state = State.SEARCHING;
+                        state = State.EXPLORING;
+                        if (wanderTarget == null || player.blockPosition().distSqr(wanderTarget) < 9) {
+                            int dx = RANDOM.nextInt(61) - 30;
+                            int dz = RANDOM.nextInt(61) - 30;
+                            wanderTarget = player.blockPosition().offset(dx, 0, dz);
+                        }
                     } else {
                         state = State.SEARCHING;
                     }
@@ -294,6 +300,13 @@ public final class CivilizationAI implements ModInitializer {
                 } else {
                     walkToward(target);
                 }
+            } else if (state == State.EXPLORING && wanderTarget != null) {
+                walkToward(wanderTarget);
+                if (player.blockPosition().distSqr(wanderTarget) < 9) {
+                    wanderTarget = null;
+                    scanCooldown = 0;
+                }
+                if (gameTick % 40 == 0) lookAround(gameTick);
             } else {
                 lookAround(gameTick);
             }
@@ -440,7 +453,8 @@ public final class CivilizationAI implements ModInitializer {
             return total;
         }
 
-        private void buildShelter() {
+        private void buildShelter(int gameTick) {
+            if (actionCooldown > 0) return;
             if (shelterOrigin == null) shelterOrigin = player.blockPosition().offset(3, 0, 0);
             if (shelterIndex >= SHELTER_LAYOUT.size()) {
                 state = State.EXPLORING;
@@ -466,7 +480,7 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
                 if (block != Blocks.OAK_PLANKS) continue;
-                player.getInventory().setSelectedItem(stack.copy());
+                player.getInventory().selected = slot;
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);
                     shelterIndex--;
@@ -475,6 +489,8 @@ public final class CivilizationAI implements ModInitializer {
                 player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
                 level.setBlock(placeAt, block.defaultBlockState(), 3);
                 stack.shrink(1);
+                player.containerMenu.broadcastChanges();
+                actionCooldown = 8;
                 return;
             }
             state = State.SEARCHING;

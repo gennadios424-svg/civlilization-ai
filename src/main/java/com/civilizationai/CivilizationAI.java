@@ -264,6 +264,9 @@ public final class CivilizationAI implements ModInitializer {
         private int farmCooldown;
         private BlockPos miningTarget;
         private int miningProgress;
+        private List<BlockPos> navigationPath = new ArrayList<>();
+        private BlockPos pathDestination;
+        private int pathRecalculationCooldown;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
@@ -494,51 +497,76 @@ public final class CivilizationAI implements ModInitializer {
         }
 
         private void walkToward(BlockPos destination) {
-            Vec3 current = player.position();
-            Vec3 targetPoint = Vec3.atBottomCenterOf(destination);
-            Vec3 direction = new Vec3(targetPoint.x - current.x, 0, targetPoint.z - current.z);
-            double distance = direction.length();
-            Vec3 velocity = player.getDeltaMovement();
-            if (distance < 0.15) {
+            if (destination == null) return;
+            if (pathRecalculationCooldown > 0) pathRecalculationCooldown--;
+
+            if (!destination.equals(pathDestination)
+                    || (navigationPath.isEmpty() && pathRecalculationCooldown == 0)) {
+                pathDestination = destination.immutable();
+                navigationPath = GroundPathfinder.findPath(level, player.blockPosition(), destination);
+                pathRecalculationCooldown = 20;
+            }
+
+            while (!navigationPath.isEmpty()) {
+                BlockPos waypoint = navigationPath.get(0);
+                double dx = waypoint.getX() + 0.5 - player.getX();
+                double dz = waypoint.getZ() + 0.5 - player.getZ();
+                double dy = waypoint.getY() - player.getY();
+                if (dx * dx + dz * dz < 0.16 && Math.abs(dy) < 0.65) {
+                    navigationPath.remove(0);
+                } else {
+                    break;
+                }
+            }
+
+            if (navigationPath.isEmpty()) {
+                Vec3 velocity = player.getDeltaMovement();
+                player.setDeltaMovement(velocity.x * 0.35, velocity.y, velocity.z * 0.35);
                 player.setSprinting(false);
-                player.setDeltaMovement(velocity.x * 0.45, velocity.y, velocity.z * 0.45);
                 return;
             }
 
-            Vec3 desired = direction.normalize().scale(Math.min(0.11, distance * 0.16));
+            BlockPos waypoint = navigationPath.get(0);
+            Vec3 offset = new Vec3(
+                    waypoint.getX() + 0.5 - player.getX(),
+                    0,
+                    waypoint.getZ() + 0.5 - player.getZ()
+            );
+            double distance = offset.length();
+            if (distance < 0.05) return;
+
+            Vec3 desired = offset.normalize().scale(Math.min(0.105, distance * 0.18));
             float desiredYaw = (float) (Math.atan2(-desired.x, desired.z) * (180.0 / Math.PI));
             float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
-            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -4.0F, 4.0F));
+            player.setYRot(player.getYRot()
+                    + net.minecraft.util.Mth.clamp(yawDelta, -5.0F, 5.0F));
+            player.setYHeadRot(player.getYRot());
             player.yBodyRot = player.getYRot();
 
-            // Accelerate and decelerate horizontally rather than teleporting by fixed offsets.
+            Vec3 velocity = player.getDeltaMovement();
             Vec3 horizontal = new Vec3(
-                    velocity.x * 0.65 + desired.x * 0.35,
+                    velocity.x * 0.62 + desired.x * 0.38,
                     0,
-                    velocity.z * 0.65 + desired.z * 0.35
+                    velocity.z * 0.62 + desired.z * 0.38
             );
-            double gravity = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
-            Vec3 motion = new Vec3(horizontal.x, gravity, horizontal.z);
+            double vertical = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
 
+            if (waypoint.getY() > player.blockPosition().getY() && player.onGround()) {
+                player.jumpFromGround();
+                vertical = 0.42;
+            }
+
+            Vec3 motion = new Vec3(horizontal.x, vertical, horizontal.z);
             if (!level.noCollision(player, player.getBoundingBox().move(horizontal))) {
-                Vec3 left = new Vec3(-desired.z, 0, desired.x).scale(0.10);
-                Vec3 right = new Vec3(desired.z, 0, -desired.x).scale(0.10);
-                if (level.noCollision(player, player.getBoundingBox().move(left))) {
-                    motion = new Vec3(left.x, gravity, left.z);
-                } else if (level.noCollision(player, player.getBoundingBox().move(right))) {
-                    motion = new Vec3(right.x, gravity, right.z);
-                } else if (player.onGround()
-                        && level.noCollision(player, player.getBoundingBox().move(horizontal.x, 1.0, horizontal.z))) {
-                    player.jumpFromGround();
-                    motion = new Vec3(horizontal.x, 0.42, horizontal.z);
-                } else {
-                    motion = new Vec3(0, gravity, 0);
-                }
+                navigationPath.clear();
+                pathRecalculationCooldown = 0;
+                player.setDeltaMovement(0, vertical, 0);
+                return;
             }
 
             player.move(MoverType.SELF, motion);
             player.setDeltaMovement(motion);
-            player.setSprinting(distance > 1.0 && player.onGround());
+            player.setSprinting(distance > 3.0 && player.onGround());
         }
 
         private boolean gatherTarget() {

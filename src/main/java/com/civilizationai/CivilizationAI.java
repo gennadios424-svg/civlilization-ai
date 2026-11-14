@@ -17,6 +17,11 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.animal.Cow;
+import net.minecraft.world.entity.animal.Pig;
+import net.minecraft.world.entity.animal.Sheep;
+import net.minecraft.world.entity.animal.Chicken;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -33,6 +38,8 @@ import org.slf4j.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -79,10 +86,12 @@ public final class CivilizationAI implements ModInitializer {
         );
 
         ServerTickEvents.END_SERVER_TICK.register(CivilizationAI::tickBots);
-        ServerLifecycleEvents.SERVER_STARTED.register(server ->
-                LOGGER.info("[Civilization AI] Ready. Use /civai spawn <1-100> to create AI players.")
-        );
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            restoreCitizens(server);
+            LOGGER.info("[Civilization AI] Ready. Use /civai spawn <1-100> to create AI players.");
+        });
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            persistCitizens(server);
             BOTS.clear();
             SETTLEMENTS.clear();
         });
@@ -149,7 +158,10 @@ public final class CivilizationAI implements ModInitializer {
     }
 
     private static FakePlayer createBot(ServerLevel level, BlockPos origin, String name) {
-        UUID uuid = UUID.randomUUID();
+        return createBot(level, origin, name, UUID.randomUUID(), true);
+    }
+
+    private static FakePlayer createBot(ServerLevel level, BlockPos origin, String name, UUID uuid, boolean announce) {
         GameProfile profile = new GameProfile(uuid, name);
         FakePlayer bot = FakePlayer.get(level, profile);
 
@@ -167,10 +179,12 @@ public final class CivilizationAI implements ModInitializer {
         level.addNewPlayer(bot);
         BotBrain brain = new BotBrain(bot, level);
         BOTS.put(uuid, brain);
-        level.getServer().getPlayerList().broadcastSystemMessage(
-                Component.literal("<" + name + "> " + brain.personality.greeting()),
-                false
-        );
+        if (announce) {
+            level.getServer().getPlayerList().broadcastSystemMessage(
+                    Component.literal("<" + name + "> " + brain.personality.greeting()),
+                    false
+            );
+        }
         assignNearestSettlement(brain);
         LOGGER.info("[Civilization AI] Spawned {}", name);
         return bot;
@@ -204,12 +218,95 @@ public final class CivilizationAI implements ModInitializer {
         return name.length() > 16 ? first + suffix : name;
     }
 
+    private static CivilizationMemoryData memory(MinecraftServer server) {
+        return server.overworld().getDataStorage().computeIfAbsent(CivilizationMemoryData.TYPE);
+    }
+
     private static void tickBots(MinecraftServer server) {
-        for (BotBrain brain : BOTS.values()) {
+        for (BotBrain brain : new ArrayList<>(BOTS.values())) {
             if (brain.player.isRemoved() || !brain.level.players().contains(brain.player)) continue;
             brain.tick(server.getTickCount());
         }
         if (server.getTickCount() % 10 == 0) coordinateTeams();
+        if (server.getTickCount() % 40 == 0) persistCitizens(server);
+    }
+
+    private static void persistCitizens(MinecraftServer server) {
+        CivilizationMemoryData data = memory(server);
+        for (BotBrain brain : BOTS.values()) {
+            String prefix = "citizen." + brain.player.getUUID() + ".";
+            data.put(prefix + "name", brain.player.getGameProfile().name());
+            data.put(prefix + "dimension", brain.level.dimension().toString());
+            data.put(prefix + "x", Double.toString(brain.player.getX()));
+            data.put(prefix + "y", Double.toString(brain.player.getY()));
+            data.put(prefix + "z", Double.toString(brain.player.getZ()));
+            data.put(prefix + "food", Integer.toString(brain.player.getFoodData().getFoodLevel()));
+            data.put(prefix + "health", Float.toString(brain.player.getHealth()));
+            data.put(prefix + "curiosity", Float.toString(brain.personality.curiosity()));
+            data.put(prefix + "industry", Float.toString(brain.personality.industriousness()));
+            data.put(prefix + "sociability", Float.toString(brain.personality.sociability()));
+            data.put(prefix + "caution", Float.toString(brain.personality.caution()));
+            data.put(prefix + "cooperation", Float.toString(brain.personality.cooperation()));
+            data.put(prefix + "state", brain.state.name());
+            data.put(prefix + "target", encodePos(brain.target));
+            data.put(prefix + "wander", encodePos(brain.wanderTarget));
+            data.put(prefix + "shelter", encodePos(brain.shelterOrigin));
+            data.put(prefix + "shelterIndex", Integer.toString(brain.shelterIndex));
+            for (Map.Entry<UUID, Integer> relationship : brain.relationships.entrySet()) {
+                data.put(prefix + "relationship." + relationship.getKey(), Integer.toString(relationship.getValue()));
+            }
+        }
+        data.setDirty();
+    }
+
+    private static void restoreCitizens(MinecraftServer server) {
+        Map<String, String> saved = memory(server).snapshot();
+        Set<UUID> citizens = new HashSet<>();
+        for (String key : saved.keySet()) {
+            if (!key.startsWith("citizen.") || !key.endsWith(".name")) continue;
+            String id = key.substring("citizen.".length(), key.length() - ".name".length());
+            try { citizens.add(UUID.fromString(id)); } catch (IllegalArgumentException ignored) {}
+        }
+
+        for (UUID id : citizens) {
+            String prefix = "citizen." + id + ".";
+            String name = saved.get(prefix + "name");
+            String dimension = saved.get(prefix + "dimension");
+            if (name == null || dimension == null) continue;
+            ServerLevel level = null;
+            for (ServerLevel candidate : server.getAllLevels()) {
+                if (candidate.dimension().toString().equals(dimension)) {
+                    level = candidate;
+                    break;
+                }
+            }
+            if (level == null) continue;
+            try {
+                double x = Double.parseDouble(saved.getOrDefault(prefix + "x", "0"));
+                double y = Double.parseDouble(saved.getOrDefault(prefix + "y", "80"));
+                double z = Double.parseDouble(saved.getOrDefault(prefix + "z", "0"));
+                BlockPos pos = BlockPos.containing(x, y, z);
+                if (!level.hasChunkAt(pos)) continue;
+                createBot(level, pos, name, id, false);
+            } catch (RuntimeException exception) {
+                LOGGER.warn("[Civilization AI] Could not restore citizen {}", id, exception);
+            }
+        }
+        LOGGER.info("[Civilization AI] Restored {} persistent citizen memories.", BOTS.size());
+    }
+
+    private static String encodePos(BlockPos pos) {
+        return pos == null ? "" : pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    private static BlockPos decodePos(String encoded) {
+        if (encoded == null || encoded.isBlank()) return null;
+        try {
+            String[] parts = encoded.split(",");
+            return new BlockPos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private static void coordinateTeams() {
@@ -351,9 +448,11 @@ public final class CivilizationAI implements ModInitializer {
         private int farmCooldown;
         private BlockPos miningTarget;
         private float miningProgress;
-        private final Personality personality = Personality.random(RANDOM);
-        private final Personality.Profession profession = personality.preferredProfession();
+        private final Personality personality;
+        private final Personality.Profession profession;
         private Settlement settlement;
+        private Animal foodTarget;
+        private int huntCooldown;
         private List<BlockPos> navigationPath = new ArrayList<>();
         private BlockPos pathDestination;
         private int pathRecalculationCooldown;
@@ -361,6 +460,47 @@ public final class CivilizationAI implements ModInitializer {
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
             this.level = level;
+            String prefix = "citizen." + player.getUUID() + ".";
+            CivilizationMemoryData data = memory(level.getServer());
+            Map<String, String> saved = data.snapshot();
+            this.personality = new Personality(
+                    parseFloat(saved.get(prefix + "curiosity"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "industry"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "sociability"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "caution"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "cooperation"), RANDOM.nextFloat() * 0.8F + 0.2F)
+            );
+            this.profession = personality.preferredProfession();
+            this.state = parseState(saved.get(prefix + "state"));
+            this.target = decodePos(saved.get(prefix + "target"));
+            this.wanderTarget = decodePos(saved.get(prefix + "wander"));
+            this.shelterOrigin = decodePos(saved.get(prefix + "shelter"));
+            this.shelterIndex = parseInt(saved.get(prefix + "shelterIndex"), 0);
+            player.getFoodData().setFoodLevel(parseInt(saved.get(prefix + "food"), 20));
+            player.setHealth(Math.min(player.getMaxHealth(), parseFloat(saved.get(prefix + "health"), player.getMaxHealth())));
+            String relationshipPrefix = prefix + "relationship.";
+            for (Map.Entry<String, String> entry : saved.entrySet()) {
+                if (!entry.getKey().startsWith(relationshipPrefix)) continue;
+                try {
+                    relationships.put(UUID.fromString(entry.getKey().substring(relationshipPrefix.length())),
+                            parseInt(entry.getValue(), 0));
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        private static float parseFloat(String value, float fallback) {
+            try { return value == null ? fallback : Float.parseFloat(value); }
+            catch (NumberFormatException ignored) { return fallback; }
+        }
+
+        private static int parseInt(String value, int fallback) {
+            try { return value == null ? fallback : Integer.parseInt(value); }
+            catch (NumberFormatException ignored) { return fallback; }
+        }
+
+        private static State parseState(String value) {
+            try { return value == null ? State.SEARCHING : State.valueOf(value); }
+            catch (IllegalArgumentException ignored) { return State.SEARCHING; }
         }
 
         private void tick(int gameTick) {
@@ -369,7 +509,9 @@ public final class CivilizationAI implements ModInitializer {
             if (socialCooldown > 0) socialCooldown--;
             if (friendshipGestureCooldown > 0) friendshipGestureCooldown--;
             if (farmCooldown > 0) farmCooldown--;
+            if (huntCooldown > 0) huntCooldown--;
             if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
+            if (manageSurvival()) return;
             handleNearbyPlayers();
 
             if (state == State.BUILDING) {
@@ -384,7 +526,8 @@ public final class CivilizationAI implements ModInitializer {
                             && countItem(Items.WHEAT_SEEDS) < 8) {
                         target = findNearestGrass(24);
                     }
-                    if (target == null && needsWoodForPlan()) {
+                    if (target == null && needsWoodForPlan()
+                            && (settlement == null || settlement.claimTask("wood", player.getUUID()))) {
                         target = findNearestTreeLog(searchRadius);
                     }
                     if (target == null && countItem(Items.STONE_PICKAXE) == 0
@@ -433,8 +576,7 @@ public final class CivilizationAI implements ModInitializer {
                 lookAround(gameTick);
             }
 
-            convertLogsToPlanks();
-            advanceCrafting();
+            if (gameTick % 20 == 0) VanillaCraftingController.tick(player, level);
             if (profession == Personality.Profession.FARMER
                     || player.getFoodData().getFoodLevel() <= 12) {
                 manageFoodAndFarm(gameTick);
@@ -452,6 +594,40 @@ public final class CivilizationAI implements ModInitializer {
             }
         }
 
+
+        private boolean manageSurvival() {
+            if (SurvivalController.eatFromInventory(player)) return true;
+            if (player.getFoodData().getFoodLevel() > 8) return false;
+
+            if (foodTarget == null || !foodTarget.isAlive()
+                    || foodTarget.distanceToSqr(player) > 24.0 * 24.0) {
+                foodTarget = level.getEntitiesOfClass(
+                        Animal.class, player.getBoundingBox().inflate(20.0),
+                        animal -> animal.isAlive() && (animal instanceof Cow || animal instanceof Pig
+                                || animal instanceof Sheep || animal instanceof Chicken)
+                ).stream().min((a, b) -> Double.compare(
+                        a.distanceToSqr(player), b.distanceToSqr(player)
+                )).orElse(null);
+            }
+
+            if (foodTarget == null) return false;
+            if (player.distanceToSqr(foodTarget) > 4.0) {
+                walkToward(foodTarget.blockPosition());
+                return true;
+            }
+
+            MovementController.stop(player);
+            MovementController.face(player, foodTarget.getEyePosition());
+            if (huntCooldown == 0 && foodTarget.isAlive()) {
+                // Use the normal player attack pipeline; no scripted mob deletion or
+                // manufactured drops. The world's normal loot and pickup systems apply.
+                player.attack(foodTarget);
+                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                huntCooldown = 20;
+                if (!foodTarget.isAlive()) foodTarget = null;
+            }
+            return true;
+        }
 
         private int countItem(net.minecraft.world.item.Item item) {
             int total = 0;
@@ -497,35 +673,6 @@ public final class CivilizationAI implements ModInitializer {
             return remaining == 0;
         }
 
-        private void advanceCrafting() {
-            if (countItem(Items.CRAFTING_TABLE) == 0 && countPlanks() >= 4) {
-                removePlanks(4);
-                player.getInventory().add(new ItemStack(Items.CRAFTING_TABLE));
-            }
-            if (countItem(Items.STICK) < 2 && countPlanks() >= 2) {
-                removePlanks(2);
-                player.getInventory().add(new ItemStack(Items.STICK, 4));
-            }
-            if (countItem(Items.WOODEN_PICKAXE) == 0
-                    && countPlanks() >= 3 && countItem(Items.STICK) >= 2) {
-                removePlanks(3);
-                removeItems(Items.STICK, 2);
-                player.getInventory().add(new ItemStack(Items.WOODEN_PICKAXE));
-            }
-            if (countItem(Items.WOODEN_HOE) == 0
-                    && countPlanks() >= 2 && countItem(Items.STICK) >= 2) {
-                removePlanks(2);
-                removeItems(Items.STICK, 2);
-                player.getInventory().add(new ItemStack(Items.WOODEN_HOE));
-            }
-            if (countItem(Items.STONE_PICKAXE) == 0
-                    && countItem(Items.COBBLESTONE) >= 3 && countItem(Items.STICK) >= 2) {
-                removeItems(Items.COBBLESTONE, 3);
-                removeItems(Items.STICK, 2);
-                player.getInventory().add(new ItemStack(Items.STONE_PICKAXE));
-            }
-        }
-
         private void manageFoodAndFarm(int gameTick) {
             if (gameTick % 20 != 0 || farmCooldown > 0) return;
             farmCooldown = 20;
@@ -540,10 +687,8 @@ public final class CivilizationAI implements ModInitializer {
                         && player.distanceToSqr(Vec3.atCenterOf(pos)) <= 4.0
                         && hasClearLineOfSight(pos)) {
                     lookAtBlock(pos);
-                    if (level.destroyBlock(pos, false, player)) {
+                    if (level.destroyBlock(pos, true, player)) {
                         player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-                        player.getInventory().add(new ItemStack(Items.WHEAT));
-                        player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
                     }
                     break;
                 }
@@ -590,14 +735,6 @@ public final class CivilizationAI implements ModInitializer {
                 }
             }
 
-            if (countItem(Items.WHEAT) >= 3) {
-                removeItems(Items.WHEAT, 3);
-                player.getInventory().add(new ItemStack(Items.BREAD));
-            }
-            if (player.getFoodData().getFoodLevel() <= 14 && countItem(Items.BREAD) > 0) {
-                removeItems(Items.BREAD, 1);
-                player.getFoodData().setFoodLevel(Math.min(20, player.getFoodData().getFoodLevel() + 5));
-            }
         }
 
         private ItemStack findTool(net.minecraft.world.item.Item item) {
@@ -954,7 +1091,9 @@ public final class CivilizationAI implements ModInitializer {
             if (countItem(Items.CRAFTING_TABLE) == 0) requiredPlanks += 4;
             if (countItem(Items.STICK) < 2) requiredPlanks += 2;
             if (countItem(Items.WOODEN_PICKAXE) == 0) requiredPlanks += 3;
-            return countWoodEquivalent() < requiredPlanks;
+            boolean needed = countWoodEquivalent() < requiredPlanks;
+            if (!needed && settlement != null) settlement.releaseTask("wood", player.getUUID());
+            return needed;
         }
 
         private int countPlanks() {

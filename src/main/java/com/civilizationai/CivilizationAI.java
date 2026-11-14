@@ -399,7 +399,8 @@ public final class CivilizationAI implements ModInitializer {
                     } else {
                         state = State.SEARCHING;
                     }
-                    scanCooldown = 100;
+                    // Desynchronise expensive world scans between citizens.
+                    scanCooldown = 80 + RANDOM.nextInt(81);
                 }
             }
 
@@ -490,7 +491,7 @@ public final class CivilizationAI implements ModInitializer {
         }
 
         private void advanceCrafting() {
-            if (countItem(Items.CRAFTING_TABLE) == 0 && countItem(Items.OAK_PLANKS) >= 4) {
+            if (countItem(Items.CRAFTING_TABLE) == 0 && countPlanks() >= 4) {
                 removePlanks(4);
                 player.getInventory().add(new ItemStack(Items.CRAFTING_TABLE));
             }
@@ -925,11 +926,12 @@ public final class CivilizationAI implements ModInitializer {
                 return;
             }
             if (shelterIndex >= SHELTER_LAYOUT.size()) {
+                BlockPos completedShelter = shelterOrigin.immutable();
+                registerSettlement(this, completedShelter);
                 state = State.EXPLORING;
                 shelterOrigin = null;
                 target = null;
                 player.setSprinting(false);
-                registerSettlement(this, shelterOrigin);
                 level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.literal("<" + player.getGameProfile().name() + "> Our shelter is ready. Welcome to " + settlement.name() + "!"),
                         false

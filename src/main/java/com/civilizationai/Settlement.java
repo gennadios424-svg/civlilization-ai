@@ -18,6 +18,7 @@ public final class Settlement {
     private final Set<UUID> members = new HashSet<>();
     private final Map<UUID, Personality.Profession> professions = new HashMap<>();
     private final Map<String, Integer> stockpile = new HashMap<>();
+    private final Map<String, UUID> taskOwners = new HashMap<>();
     private int ageTicks;
 
     public Settlement(String name, ServerLevel level, BlockPos center) {
@@ -57,6 +58,28 @@ public final class Settlement {
         int taken = Math.min(Math.max(0, amount), available);
         if (taken > 0) stockpile.put(resource, available - taken);
         return taken;
+    }
+
+    public boolean claimTask(String task, UUID citizen) {
+        UUID owner = taskOwners.get(task);
+        if (owner == null || owner.equals(citizen)) {
+            taskOwners.put(task, citizen);
+            return true;
+        }
+        return false;
+    }
+
+    public boolean taskOwnedByOther(String task, UUID citizen) {
+        UUID owner = taskOwners.get(task);
+        return owner != null && !owner.equals(citizen);
+    }
+
+    public void releaseTask(String task, UUID citizen) {
+        taskOwners.remove(task, citizen);
+    }
+
+    public UUID taskOwner(String task) {
+        return taskOwners.get(task);
     }
 
     public void moveCenter(BlockPos newCenter) {

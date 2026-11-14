@@ -135,9 +135,6 @@ public final class VanillaCraftingController {
 
             var remainders = match.get().value().getRecipeRemainders(input);
             logStack.shrink(1);
-            for (ItemStack remainder : remainders) {
-                if (!remainder.isEmpty()) player.getInventory().add(remainder.copy());
-            }
             player.getInventory().add(output.copy());
             player.inventoryMenu.broadcastChanges();
         }

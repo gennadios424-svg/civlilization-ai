@@ -13,8 +13,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
-import net.minecraft.server.level.ServerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -27,6 +25,9 @@ import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.level.ClipContext;
 import org.slf4j.Logger;
 
 import java.nio.charset.StandardCharsets;
@@ -111,7 +112,7 @@ public final class CivilizationAI implements ModInitializer {
                 source.sendSuccess(() -> Component.literal("...and " + (BOTS.size() - 20) + " more."), false);
                 break;
             }
-            source.sendSuccess(() -> Component.literal("- " + brain.player.getGameProfile().getName() + " (" + brain.state + ")"), false);
+            source.sendSuccess(() -> Component.literal("- " + brain.player.getGameProfile().name() + " (" + brain.state + ")"), false);
         }
         return BOTS.size();
     }
@@ -139,11 +140,6 @@ public final class CivilizationAI implements ModInitializer {
         level.getServer().getPlayerList().broadcastAll(
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
         );
-        // Explicitly send the player spawn packet so clients create the visible player model.
-        ServerEntity tracker = new ServerEntity(level, bot, 1, true, packet ->
-                level.getServer().getPlayerList().broadcastAll(packet)
-        );
-        level.getServer().getPlayerList().broadcastAll(new ClientboundAddEntityPacket(bot, tracker));
         level.getServer().getPlayerList().broadcastSystemMessage(
                 Component.literal("<" + name + "> Hey! I'm exploring this world."),
                 false
@@ -171,7 +167,7 @@ public final class CivilizationAI implements ModInitializer {
                 }
             }
         }
-        return level.getSharedSpawnPos();
+        return level.getServer().overworld().getSharedSpawnPos();
     }
 
     private static String randomName() {
@@ -318,11 +314,15 @@ public final class CivilizationAI implements ModInitializer {
             convertLogsToPlanks();
             advanceCrafting();
             manageFoodAndFarm(gameTick);
-            if (countPlanks() >= 16) {
-                state = State.BUILDING;
-                shelterOrigin = player.blockPosition().offset(3, 0, 0);
-                shelterIndex = 0;
-                target = null;
+            if (countPlanks() >= 17 && state != State.BUILDING) {
+                BlockPos site = findShelterSite(8);
+                if (site != null) {
+                    state = State.BUILDING;
+                    shelterOrigin = site;
+                    shelterIndex = 0;
+                    target = null;
+                    wanderTarget = null;
+                }
             }
         }
 
@@ -511,6 +511,7 @@ public final class CivilizationAI implements ModInitializer {
             if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return;
             BlockState state = level.getBlockState(target);
             if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
+            if (!hasClearLineOfSight(target)) return;
             Block itemBlock = state.getBlock();
             player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
             if (level.destroyBlock(target, false, player)) {
@@ -525,6 +526,53 @@ public final class CivilizationAI implements ModInitializer {
                         false
                 );
             }
+        }
+
+        private boolean hasClearLineOfSight(BlockPos pos) {
+            Vec3 eye = player.getEyePosition();
+            Vec3 aim = Vec3.atCenterOf(pos);
+            BlockHitResult hit = level.clip(new ClipContext(
+                    eye, aim, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player
+            ));
+            return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(pos);
+        }
+
+        private BlockPos findShelterSite(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos floor = center.offset(dx, -1, dz);
+                    BlockPos origin = floor.above();
+                    double distance = origin.distSqr(center);
+                    if (distance < 16 || distance > radius * radius || distance >= bestDistance) continue;
+                    boolean valid = true;
+                    for (int x = -1; x <= 1 && valid; x++) {
+                        for (int z = -1; z <= 1 && valid; z++) {
+                            BlockPos ground = floor.offset(x, 0, z);
+                            if (!level.getBlockState(ground).isSolid()
+                                    || !level.getFluidState(ground).isEmpty()) {
+                                valid = false;
+                                break;
+                            }
+                            for (int y = 1; y <= 2; y++) {
+                                BlockPos space = ground.above(y);
+                                if (!level.getBlockState(space).isAir()
+                                        || !level.getFluidState(space).isEmpty()) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (valid) {
+                        best = origin.immutable();
+                        bestDistance = distance;
+                    }
+                }
+            }
+            return best;
         }
 
         private void lookAtBlock(BlockPos pos) {
@@ -574,7 +622,7 @@ public final class CivilizationAI implements ModInitializer {
                 state = State.EXPLORING;
                 shelterOrigin = null;
                 target = null;
-                player.getServer().getPlayerList().broadcastSystemMessage(
+                level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.literal("<" + player.getGameProfile().getName() + "> Shelter built! This place is ours. Time to explore."),
                         false
                 );
@@ -588,13 +636,13 @@ public final class CivilizationAI implements ModInitializer {
             );
             shelterIndex++;
             if (!level.getBlockState(placeAt).isAir()) return;
+            if (!level.getBlockState(placeAt.below()).isSolid()) return;
 
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
                 if (block != Blocks.OAK_PLANKS) continue;
-                player.getInventory().selected = slot;
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);
                     shelterIndex--;
@@ -613,6 +661,8 @@ public final class CivilizationAI implements ModInitializer {
 
         private void handleNearbyPlayers() {
             if (socialCooldown > 0) return;
+            // Social gestures are idle-only: never turn away from a mining/building target.
+            if (target != null || state == State.BUILDING) return;
             for (ServerPlayer nearby : level.players()) {
                 if (nearby == player || nearby.isRemoved() || nearby.distanceToSqr(player) > 25.0) continue;
                 Vec3 delta = nearby.getEyePosition().subtract(player.getEyePosition());

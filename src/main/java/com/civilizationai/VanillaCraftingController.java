@@ -25,6 +25,12 @@ import java.util.Optional;
  * consumption happens only after a matching recipe has assembled an output.
  */
 public final class VanillaCraftingController {
+    private static final Item[] PLANKS = {
+            Items.OAK_PLANKS, Items.SPRUCE_PLANKS, Items.BIRCH_PLANKS, Items.JUNGLE_PLANKS,
+            Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS, Items.MANGROVE_PLANKS,
+            Items.CHERRY_PLANKS, Items.CRIMSON_PLANKS, Items.WARPED_PLANKS
+    };
+
     private VanillaCraftingController() {}
 
     public static void tick(ServerPlayer player, ServerLevel level) {
@@ -42,39 +48,73 @@ public final class VanillaCraftingController {
 
         // Starter progression is recipe-backed. The recipe manager validates
         // the grid and computes output and remainders before ingredients shrink.
-        if (count(player, Items.CRAFTING_TABLE) == 0 && !hasCraftingTableNearby(player, level, 12)) {
-            tryPattern(player, level, 2, 2, new Item[]{
-                    Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS
-            });
-        }
-
-        if (count(player, Items.STICK) < 2) {
-            tryPattern(player, level, 2, 2, new Item[]{
-                    Items.OAK_PLANKS, null, Items.OAK_PLANKS, null
-            });
+        for (Item plank : PLANKS) {
+            if (count(player, Items.CRAFTING_TABLE) == 0 && !hasCraftingTableNearby(player, level, 12)) {
+                tryPattern(player, level, 2, 2, new Item[]{plank, plank, plank, plank});
+            }
+            if (count(player, Items.STICK) < 2) {
+                tryPattern(player, level, 2, 2, new Item[]{plank, null, plank, null});
+            }
+            if (tableAvailable && count(player, Items.WOODEN_PICKAXE) == 0) {
+                tryPattern(player, level, 3, 3, new Item[]{
+                        plank, plank, plank,
+                        null, Items.STICK, null,
+                        null, Items.STICK, null
+                });
+            }
+            if (tableAvailable && count(player, Items.WOODEN_HOE) == 0) {
+                tryPattern(player, level, 3, 3, new Item[]{
+                        plank, plank, null,
+                        null, Items.STICK, null,
+                        null, Items.STICK, null
+                });
+            }
         }
 
         if (!tableAvailable) return;
 
-        if (count(player, Items.WOODEN_PICKAXE) == 0) {
-            tryPattern(player, level, 3, 3, new Item[]{
-                    Items.OAK_PLANKS, Items.OAK_PLANKS, Items.OAK_PLANKS,
-                    null, Items.STICK, null,
-                    null, Items.STICK, null
-            });
-        }
-        if (count(player, Items.WOODEN_HOE) == 0) {
-            tryPattern(player, level, 3, 3, new Item[]{
-                    Items.OAK_PLANKS, Items.OAK_PLANKS, null,
-                    null, Items.STICK, null,
-                    null, Items.STICK, null
-            });
-        }
         if (count(player, Items.STONE_PICKAXE) == 0 && count(player, Items.COBBLESTONE) >= 3) {
             tryPattern(player, level, 3, 3, new Item[]{
                     Items.COBBLESTONE, Items.COBBLESTONE, Items.COBBLESTONE,
                     null, Items.STICK, null,
                     null, Items.STICK, null
+            });
+        }
+        if (count(player, Items.FURNACE) == 0 && count(player, Items.COBBLESTONE) >= 8) {
+            tryPattern(player, level, 3, 3, new Item[]{
+                    Items.COBBLESTONE, Items.COBBLESTONE, Items.COBBLESTONE,
+                    Items.COBBLESTONE, null, Items.COBBLESTONE,
+                    Items.COBBLESTONE, Items.COBBLESTONE, Items.COBBLESTONE
+            });
+        }
+        if (count(player, Items.CHEST) == 0) {
+            for (Item plank : PLANKS) {
+                if (tryPattern(player, level, 3, 3, new Item[]{
+                        plank, plank, plank,
+                        plank, null, plank,
+                        plank, plank, plank
+                })) break;
+            }
+        }
+        if (count(player, Items.OAK_DOOR) == 0) {
+            for (Item plank : PLANKS) {
+                if (tryPattern(player, level, 3, 3, new Item[]{
+                        plank, plank, null,
+                        plank, plank, null,
+                        plank, plank, null
+                })) break;
+            }
+        }
+        if (count(player, Items.BREAD) < 3 && count(player, Items.WHEAT) >= 3) {
+            tryPattern(player, level, 3, 3, new Item[]{
+                    Items.WHEAT, Items.WHEAT, Items.WHEAT,
+                    null, null, null,
+                    null, null, null
+            });
+        }
+        if (count(player, Items.TORCH) < 8 && count(player, Items.COAL) > 0 && count(player, Items.STICK) > 0) {
+            tryPattern(player, level, 2, 2, new Item[]{
+                    Items.COAL, null, Items.STICK, null
             });
         }
     }

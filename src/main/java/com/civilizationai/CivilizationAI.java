@@ -159,11 +159,12 @@ public final class CivilizationAI implements ModInitializer {
         bot.setCustomName(Component.literal(name));
         bot.setCustomNameVisible(true);
 
-        // Register the fake player with the world entity tracker and publish its profile first.
-        level.addNewPlayer(bot);
+        // The client must know the player's profile before it receives the entity spawn packet.
+        // Otherwise the client can discard the player entity and leave the bot invisible.
         level.getServer().getPlayerList().broadcastAll(
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
         );
+        level.addNewPlayer(bot);
         BotBrain brain = new BotBrain(bot, level);
         BOTS.put(uuid, brain);
         level.getServer().getPlayerList().broadcastSystemMessage(

@@ -277,6 +277,7 @@ public final class CivilizationAI implements ModInitializer {
             if (target == null || scanCooldown == 0) {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
                     target = findNearestTreeLog(50);
+                    if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
                         target = null;
                         state = State.EXPLORING;
@@ -407,6 +408,30 @@ public final class CivilizationAI implements ModInitializer {
             }
         }
 
+
+        private BlockPos findNearestGrass(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
+                    for (int y = -2; y <= 3; y++) {
+                        BlockPos pos = center.offset(x, y, z);
+                        if (!level.hasChunkAt(pos)) continue;
+                        BlockState state = level.getBlockState(pos);
+                        if (state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS)) {
+                            double distance = pos.distSqr(center);
+                            if (distance < bestDistance) {
+                                best = pos.immutable();
+                                bestDistance = distance;
+                            }
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
         private BlockPos findNearestTreeLog(int radius) {
             BlockPos center = player.blockPosition();
             BlockPos best = null;
@@ -491,7 +516,10 @@ public final class CivilizationAI implements ModInitializer {
             if (level.destroyBlock(target, false, player)) {
                 ItemStack collected = new ItemStack(itemBlock.asItem());
                 if (!collected.isEmpty()) player.getInventory().add(collected);
-                if (RANDOM.nextInt(8) == 0 && countItem(Items.WHEAT_SEEDS) < 16) player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                if ((state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS))
+                        && RANDOM.nextInt(3) == 0 && countItem(Items.WHEAT_SEEDS) < 16) {
+                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                }
                 level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.literal("<" + player.getGameProfile().getName() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
                         false

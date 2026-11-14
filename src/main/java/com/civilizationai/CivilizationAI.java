@@ -812,8 +812,8 @@ public final class CivilizationAI implements ModInitializer {
                     || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE);
             if (!stone) return;
 
-            int selected = player.getInventory().selected;
-            ItemStack held = player.getInventory().getSelected();
+            int selected = player.getInventory().getSelectedSlot();
+            ItemStack held = player.getInventory().getSelectedItem();
             if (held.is(Items.WOODEN_PICKAXE) || held.is(Items.STONE_PICKAXE)
                     || held.is(Items.IRON_PICKAXE) || held.is(Items.DIAMOND_PICKAXE)
                     || held.is(Items.NETHERITE_PICKAXE)) return;
@@ -823,11 +823,11 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.is(Items.WOODEN_PICKAXE) || stack.is(Items.STONE_PICKAXE)
                         || stack.is(Items.IRON_PICKAXE) || stack.is(Items.DIAMOND_PICKAXE)
                         || stack.is(Items.NETHERITE_PICKAXE)) {
-                    player.getInventory().selected = slot;
+                    player.getInventory().setSelectedSlot(slot);
                     return;
                 }
             }
-            player.getInventory().selected = selected;
+            player.getInventory().setSelectedSlot(selected);
         }
 
         private boolean hasClearLineOfSight(BlockPos pos) {

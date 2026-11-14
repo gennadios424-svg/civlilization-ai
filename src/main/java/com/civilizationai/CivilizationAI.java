@@ -350,7 +350,7 @@ public final class CivilizationAI implements ModInitializer {
         private BlockPos wanderTarget;
         private int farmCooldown;
         private BlockPos miningTarget;
-        private int miningProgress;
+        private float miningProgress;
         private final Personality personality = Personality.random(RANDOM);
         private final Personality.Profession profession = personality.preferredProfession();
         private Settlement settlement;
@@ -410,7 +410,7 @@ public final class CivilizationAI implements ModInitializer {
 
             if (target != null) {
                 lookAtBlock(target);
-                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0) {
+                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 20.25) {
                     if (actionCooldown == 0) {
                         boolean finished = gatherTarget();
                         actionCooldown = finished ? 8 : 1;
@@ -763,8 +763,15 @@ public final class CivilizationAI implements ModInitializer {
 
         private boolean gatherTarget() {
             if (target == null) return true;
+
             lookAtBlock(target);
-            if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return false;
+            double distance = player.distanceToSqr(Vec3.atCenterOf(target));
+            if (distance > 20.25) {
+                miningTarget = null;
+                miningProgress = 0;
+                return false;
+            }
+
             BlockState state = level.getBlockState(target);
             if (state.isAir() || state.getDestroySpeed(level, target) < 0
                     || !hasClearLineOfSight(target)) {
@@ -778,43 +785,61 @@ public final class CivilizationAI implements ModInitializer {
                 miningProgress = 0;
             }
 
-            // Require visible, timed mining progress instead of deleting blocks on contact.
-            float hardness = state.getDestroySpeed(level, target);
-            boolean hasAxe = countItem(Items.WOODEN_AXE) > 0;
-            boolean hasPickaxe = countItem(Items.STONE_PICKAXE) > 0
-                    || countItem(Items.WOODEN_PICKAXE) > 0;
-            float toolFactor = state.is(BlockTags.LOGS) && hasAxe ? 7.0F
-                    : (state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
-                    || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE)) && hasPickaxe ? 8.0F : 30.0F;
-            int requiredTicks = Math.max(4, Math.min(160, (int) Math.ceil(hardness * toolFactor)));
-            miningProgress++;
-            if (miningProgress % 5 == 0) {
-                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-            }
-            if (miningProgress < requiredTicks) return false;
+            // Select a suitable tool into the real main hand before calculating
+            // vanilla destroy progress and invoking the normal server game mode.
+            selectMiningTool(state);
+            float progress = state.getDestroyProgress(player, level, target);
+            if (progress <= 0.0F) return false;
 
-            Block itemBlock = state.getBlock();
-            boolean broken = level.destroyBlock(target, false, player);
+            miningProgress = Math.min(1.0F, miningProgress + progress);
+            player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+            if (miningProgress < 1.0F) return false;
+
+            // ServerPlayerGameMode performs the normal survival break, tool
+            // durability, loot-table drops, block callbacks and statistics.
+            boolean broken = player.gameMode.destroyBlock(target);
             miningTarget = null;
             miningProgress = 0;
-            if (broken) {
-                net.minecraft.world.item.Item drop = itemBlock.asItem();
-                if (state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
-                        || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE)) {
-                    drop = Items.COBBLESTONE;
-                }
-                ItemStack collected = new ItemStack(drop);
-                if (!collected.isEmpty()) player.getInventory().add(collected);
-                if ((state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS))
-                        && RANDOM.nextInt(3) == 0 && countItem(Items.WHEAT_SEEDS) < 16) {
-                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
-                }
-                level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().name() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
-                        false
-                );
+            if (!broken && !level.getBlockState(target).isAir()) {
+                return true;
             }
             return true;
+        }
+
+        private void selectMiningTool(BlockState state) {
+            boolean logs = state.is(BlockTags.LOGS);
+            boolean stone = state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                    || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE);
+            if (!logs && !stone) return;
+
+            net.minecraft.world.item.Item preferred = logs
+                    ? Items.WOODEN_AXE : Items.WOODEN_PICKAXE;
+            net.minecraft.world.item.Item better = logs
+                    ? Items.STONE_AXE : Items.STONE_PICKAXE;
+
+            int selected = player.getInventory().selected;
+            ItemStack held = player.getInventory().getSelected();
+            if (held.is(preferred) || held.is(better)
+                    || (logs && (held.is(Items.IRON_AXE) || held.is(Items.DIAMOND_AXE) || held.is(Items.NETHERITE_AXE)))
+                    || (stone && (held.is(Items.IRON_PICKAXE) || held.is(Items.DIAMOND_PICKAXE) || held.is(Items.NETHERITE_PICKAXE)))) {
+                return;
+            }
+
+            for (int slot = 0; slot < 9; slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                boolean suitable = logs
+                        ? stack.is(Items.WOODEN_AXE) || stack.is(Items.STONE_AXE)
+                            || stack.is(Items.IRON_AXE) || stack.is(Items.DIAMOND_AXE)
+                            || stack.is(Items.NETHERITE_AXE)
+                        : stack.is(Items.WOODEN_PICKAXE) || stack.is(Items.STONE_PICKAXE)
+                            || stack.is(Items.IRON_PICKAXE) || stack.is(Items.DIAMOND_PICKAXE)
+                            || stack.is(Items.NETHERITE_PICKAXE);
+                if (suitable) {
+                    player.getInventory().selected = slot;
+                    return;
+                }
+            }
+            player.getInventory().selected = selected;
         }
 
         private boolean hasClearLineOfSight(BlockPos pos) {

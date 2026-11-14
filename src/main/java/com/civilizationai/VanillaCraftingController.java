@@ -93,8 +93,7 @@ public final class VanillaCraftingController {
             ItemStack output = match.get().value().assemble(input, level.registryAccess());
             if (output.isEmpty() || !canFit(player, output)) return;
 
-            var remainders = level.getServer().getRecipeManager()
-                    .getRemainingItemsFor(RecipeType.CRAFTING, input, level);
+            var remainders = match.get().value().getRecipeRemainders(input);
             logStack.shrink(1);
             for (ItemStack remainder : remainders) {
                 if (!remainder.isEmpty()) player.getInventory().add(remainder.copy());

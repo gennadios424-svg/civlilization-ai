@@ -71,6 +71,8 @@ public final class CivilizationAI implements ModInitializer {
                                         ))))
                         .then(Commands.literal("list")
                                 .executes(context -> listCommand(context.getSource())))
+                        .then(Commands.literal("settlements")
+                                .executes(context -> settlementsCommand(context.getSource())))
                         .then(Commands.literal("help")
                                 .executes(context -> helpCommand(context.getSource())))
                 )
@@ -118,9 +120,22 @@ public final class CivilizationAI implements ModInitializer {
         return BOTS.size();
     }
 
+    private static int settlementsCommand(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal("Civilization settlements: " + SETTLEMENTS.size()), false);
+        for (Settlement settlement : SETTLEMENTS.values()) {
+            if (settlement.level() != source.getLevel()) continue;
+            source.sendSuccess(() -> Component.literal(
+                    settlement.name() + " | Citizens: " + settlement.members().size()
+                            + " | Center: " + settlement.center().toShortString()
+                            + " | Shared planks: " + settlement.stock("planks")
+            ), false);
+        }
+        return SETTLEMENTS.size();
+    }
+
     private static int helpCommand(CommandSourceStack source) {
         source.sendSuccess(() -> Component.literal(
-                "Civilization AI commands: /civai spawn <1-100>, /civai list, /civai help"
+                "Civilization AI commands: /civai spawn <1-100>, /civai list, /civai settlements, /civai help"
         ), false);
         return 1;
     }
@@ -356,13 +371,18 @@ public final class CivilizationAI implements ModInitializer {
             if (target == null || scanCooldown == 0) {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
                     int searchRadius = 14 + Math.round(personality.curiosity() * 12.0F);
-                    target = findNearestTreeLog(searchRadius);
+                    if (profession == Personality.Profession.FARMER
+                            && countItem(Items.WHEAT_SEEDS) < 8) {
+                        target = findNearestGrass(24);
+                    }
+                    if (target == null) target = findNearestTreeLog(searchRadius);
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
                         target = null;
                         state = State.EXPLORING;
                         if (wanderTarget == null || player.blockPosition().distSqr(wanderTarget) < 9) {
-                            int wanderRadius = 12 + Math.round(personality.curiosity() * 24);
+                            int wanderRadius = 12 + Math.round(personality.curiosity() * 24)
+                                    + (profession == Personality.Profession.SCOUT ? 12 : 0);
                             int dx = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
                             int dz = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
                             wanderTarget = player.blockPosition().offset(dx, 0, dz);

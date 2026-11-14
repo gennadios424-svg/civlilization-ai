@@ -20,6 +20,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -273,8 +274,8 @@ public final class CivilizationAI implements ModInitializer {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
                     target = findNearestTreeLog(50);
                     if (target == null) {
-                        target = findNearestEasyBlock(16);
-                        state = State.GATHERING;
+                        target = null;
+                        state = State.SEARCHING;
                     } else {
                         state = State.SEARCHING;
                     }
@@ -283,7 +284,8 @@ public final class CivilizationAI implements ModInitializer {
             }
 
             if (target != null) {
-                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 2.25) {
+                lookAtBlock(target);
+                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0) {
                     if (actionCooldown == 0) {
                         gatherTarget();
                         actionCooldown = 12;
@@ -296,7 +298,8 @@ public final class CivilizationAI implements ModInitializer {
                 lookAround(gameTick);
             }
 
-            if (countGatheredBlocks() >= 12) {
+            convertLogsToPlanks();
+            if (countPlanks() >= 16) {
                 state = State.BUILDING;
                 shelterOrigin = player.blockPosition().offset(3, 0, 0);
                 shelterIndex = 0;
@@ -308,8 +311,8 @@ public final class CivilizationAI implements ModInitializer {
             BlockPos center = player.blockPosition();
             BlockPos best = null;
             double bestDistance = Double.MAX_VALUE;
-            for (int x = -radius; x <= radius; x += 2) {
-                for (int z = -radius; z <= radius; z += 2) {
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
                     if (x * x + z * z > radius * radius) continue;
                     for (int y = -4; y <= 16; y++) {
                         BlockPos pos = center.offset(x, y, z);
@@ -360,22 +363,29 @@ public final class CivilizationAI implements ModInitializer {
             double distance = direction.length();
             if (distance < 0.05) return;
             // Small per-tick steps avoid visible position jumps from coarse 5-tick updates.
-            Vec3 step = direction.normalize().scale(Math.min(0.055, distance));
+            Vec3 step = direction.normalize().scale(Math.min(0.075, distance));
             float desiredYaw = (float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI));
             float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
             player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -2.5F, 2.5F));
             player.yBodyRot = player.getYRot();
             Vec3 velocity = player.getDeltaMovement();
-            if (!level.noCollision(player, player.getBoundingBox().move(step.x * 2.0, 0, step.z * 2.0))) {
-                if (player.onGround()) player.jumpFromGround();
-                else step = Vec3.ZERO;
+            double gravity = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
+            Vec3 motion = new Vec3(step.x, gravity, step.z);
+            if (!level.noCollision(player, player.getBoundingBox().move(step.x, 0, step.z))) {
+                if (player.onGround() && level.noCollision(player, player.getBoundingBox().move(step.x, 1.0, step.z))) {
+                    player.jumpFromGround();
+                    motion = new Vec3(step.x, 0.42, step.z);
+                } else motion = new Vec3(0, gravity, 0);
             }
-            // Vanilla ServerPlayer ticking applies gravity, collision response and limb animation.
-            player.setDeltaMovement(step.x * 0.65, velocity.y, step.z * 0.65);
+            player.move(MoverType.SELF, motion);
+            player.setDeltaMovement(motion);
+            player.setSprinting(true);
         }
 
         private void gatherTarget() {
             if (target == null) return;
+            lookAtBlock(target);
+            if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return;
             BlockState state = level.getBlockState(target);
             if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
             Block itemBlock = state.getBlock();
@@ -388,6 +398,37 @@ public final class CivilizationAI implements ModInitializer {
                         false
                 );
             }
+        }
+
+        private void lookAtBlock(BlockPos pos) {
+            Vec3 delta = Vec3.atCenterOf(pos).subtract(player.getEyePosition());
+            double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+            float yaw = (float) (Math.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
+            float pitch = (float) (-Math.atan2(delta.y, horizontal) * (180.0 / Math.PI));
+            player.setYRot(yaw);
+            player.setYHeadRot(yaw);
+            player.setXRot(pitch);
+        }
+
+        private void convertLogsToPlanks() {
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.isEmpty()) continue;
+                Block block = Block.byItem(stack.getItem());
+                if (!block.defaultBlockState().is(BlockTags.LOGS)) continue;
+                int amount = stack.getCount() * 4;
+                stack.shrink(stack.getCount());
+                player.getInventory().add(new ItemStack(Items.OAK_PLANKS, amount));
+            }
+        }
+
+        private int countPlanks() {
+            int total = 0;
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.is(Items.OAK_PLANKS)) total += stack.getCount();
+            }
+            return total;
         }
 
         private int countGatheredBlocks() {
@@ -424,7 +465,8 @@ public final class CivilizationAI implements ModInitializer {
                 ItemStack stack = player.getInventory().getItem(slot);
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
-                if (block == Blocks.AIR) continue;
+                if (block != Blocks.OAK_PLANKS) continue;
+                player.getInventory().setSelectedItem(stack.copy());
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);
                     shelterIndex--;
@@ -435,8 +477,8 @@ public final class CivilizationAI implements ModInitializer {
                 stack.shrink(1);
                 return;
             }
-            state = State.GATHERING;
-            target = findNearestEasyBlock(16);
+            state = State.SEARCHING;
+            target = null;
         }
 
         private void handleNearbyPlayers() {

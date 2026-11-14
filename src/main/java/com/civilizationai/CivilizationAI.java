@@ -94,7 +94,8 @@ public final class CivilizationAI implements ModInitializer {
             if (bot != null) spawned++;
         }
 
-        source.sendSuccess(() -> Component.literal("Spawned " + spawned + " AI player(s). Total: " + BOTS.size() + "/" + MAX_BOTS + "."), true);
+        final int spawnedCount = spawned;
+        source.sendSuccess(() -> Component.literal("Spawned " + spawnedCount + " AI player(s). Total: " + BOTS.size() + "/" + MAX_BOTS + "."), true);
         return spawned;
     }
 

@@ -15,6 +15,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.mojang.serialization.JsonOps;
 import net.minecraft.network.chat.Component;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;

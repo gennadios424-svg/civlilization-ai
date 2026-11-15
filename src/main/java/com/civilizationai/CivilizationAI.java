@@ -11,10 +11,12 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
 import net.minecraft.network.chat.Component;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
-import net.minecraft.server.level.ServerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -27,11 +29,16 @@ import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.level.ClipContext;
 import org.slf4j.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -55,6 +62,7 @@ public final class CivilizationAI implements ModInitializer {
     };
 
     private static final Map<UUID, BotBrain> BOTS = new HashMap<>();
+    private static final Map<UUID, Settlement> SETTLEMENTS = new HashMap<>();
     private static final List<BlockPos> SHELTER_LAYOUT = createShelterLayout();
 
     @Override
@@ -69,16 +77,23 @@ public final class CivilizationAI implements ModInitializer {
                                         ))))
                         .then(Commands.literal("list")
                                 .executes(context -> listCommand(context.getSource())))
+                        .then(Commands.literal("settlements")
+                                .executes(context -> settlementsCommand(context.getSource())))
                         .then(Commands.literal("help")
                                 .executes(context -> helpCommand(context.getSource())))
                 )
         );
 
         ServerTickEvents.END_SERVER_TICK.register(CivilizationAI::tickBots);
-        ServerLifecycleEvents.SERVER_STARTED.register(server ->
-                LOGGER.info("[Civilization AI] Ready. Use /civai spawn <1-100> to create AI players.")
-        );
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> BOTS.clear());
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            restoreCitizens(server);
+            LOGGER.info("[Civilization AI] Ready. Use /civai spawn <1-100> to create AI players.");
+        });
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            persistCitizens(server);
+            BOTS.clear();
+            SETTLEMENTS.clear();
+        });
     }
 
     private static int spawnCommand(CommandSourceStack source, int count) {
@@ -111,20 +126,41 @@ public final class CivilizationAI implements ModInitializer {
                 source.sendSuccess(() -> Component.literal("...and " + (BOTS.size() - 20) + " more."), false);
                 break;
             }
-            source.sendSuccess(() -> Component.literal("- " + brain.player.getGameProfile().getName() + " (" + brain.state + ")"), false);
+            source.sendSuccess(() -> Component.literal(
+                    "- " + brain.player.getGameProfile().name()
+                            + " | " + brain.profession
+                            + " | " + brain.state
+                            + (brain.settlement == null ? " | Unsettled" : " | " + brain.settlement.name())
+            ), false);
         }
         return BOTS.size();
     }
 
+    private static int settlementsCommand(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal("Civilization settlements: " + SETTLEMENTS.size()), false);
+        for (Settlement settlement : SETTLEMENTS.values()) {
+            if (settlement.level() != source.getLevel()) continue;
+            source.sendSuccess(() -> Component.literal(
+                    settlement.name() + " | Citizens: " + settlement.members().size()
+                            + " | Center: " + settlement.center().toShortString()
+                            + " | Shared planks: " + settlement.stock("planks")
+            ), false);
+        }
+        return SETTLEMENTS.size();
+    }
+
     private static int helpCommand(CommandSourceStack source) {
         source.sendSuccess(() -> Component.literal(
-                "Civilization AI commands: /civai spawn <1-100>, /civai list, /civai help"
+                "Civilization AI commands: /civai spawn <1-100>, /civai list, /civai settlements, /civai help"
         ), false);
         return 1;
     }
 
     private static FakePlayer createBot(ServerLevel level, BlockPos origin, String name) {
-        UUID uuid = UUID.randomUUID();
+        return createBot(level, origin, name, UUID.randomUUID(), true);
+    }
+
+    private static FakePlayer createBot(ServerLevel level, BlockPos origin, String name, UUID uuid, boolean announce) {
         GameProfile profile = new GameProfile(uuid, name);
         FakePlayer bot = FakePlayer.get(level, profile);
 
@@ -134,22 +170,21 @@ public final class CivilizationAI implements ModInitializer {
         bot.setCustomName(Component.literal(name));
         bot.setCustomNameVisible(true);
 
-        // Register the fake player with the world entity tracker and publish its profile first.
-        level.addNewPlayer(bot);
+        // The client must know the player's profile before it receives the entity spawn packet.
+        // Otherwise the client can discard the player entity and leave the bot invisible.
         level.getServer().getPlayerList().broadcastAll(
                 ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(bot))
         );
-        // Explicitly send the player spawn packet so clients create the visible player model.
-        ServerEntity tracker = new ServerEntity(level, bot, 1, true, packet ->
-                level.getServer().getPlayerList().broadcastAll(packet)
-        );
-        level.getServer().getPlayerList().broadcastAll(new ClientboundAddEntityPacket(bot, tracker));
-        level.getServer().getPlayerList().broadcastSystemMessage(
-                Component.literal("<" + name + "> Hey! I'm exploring this world."),
-                false
-        );
-
-        BOTS.put(uuid, new BotBrain(bot, level));
+        level.addNewPlayer(bot);
+        BotBrain brain = new BotBrain(bot, level);
+        BOTS.put(uuid, brain);
+        if (announce) {
+            level.getServer().getPlayerList().broadcastSystemMessage(
+                    Component.literal("<" + name + "> " + brain.personality.greeting()),
+                    false
+            );
+        }
+        assignNearestSettlement(brain);
         LOGGER.info("[Civilization AI] Spawned {}", name);
         return bot;
     }
@@ -171,7 +206,7 @@ public final class CivilizationAI implements ModInitializer {
                 }
             }
         }
-        return level.getSharedSpawnPos();
+        return BlockPos.ZERO;
     }
 
     private static String randomName() {
@@ -182,44 +217,241 @@ public final class CivilizationAI implements ModInitializer {
         return name.length() > 16 ? first + suffix : name;
     }
 
+    private static CivilizationMemoryData memory(MinecraftServer server) {
+        return server.overworld().getDataStorage().computeIfAbsent(CivilizationMemoryData.TYPE);
+    }
+
     private static void tickBots(MinecraftServer server) {
-        for (BotBrain brain : BOTS.values()) {
+        for (BotBrain brain : new ArrayList<>(BOTS.values())) {
             if (brain.player.isRemoved() || !brain.level.players().contains(brain.player)) continue;
             brain.tick(server.getTickCount());
         }
         if (server.getTickCount() % 10 == 0) coordinateTeams();
+        if (server.getTickCount() % 40 == 0) persistCitizens(server);
+    }
+
+    private static void persistCitizens(MinecraftServer server) {
+        CivilizationMemoryData data = memory(server);
+        for (BotBrain brain : BOTS.values()) {
+            String prefix = "citizen." + brain.player.getUUID() + ".";
+            data.put(prefix + "name", brain.player.getGameProfile().name());
+            data.put(prefix + "dimension", brain.level.dimension().toString());
+            data.put(prefix + "x", Double.toString(brain.player.getX()));
+            data.put(prefix + "y", Double.toString(brain.player.getY()));
+            data.put(prefix + "z", Double.toString(brain.player.getZ()));
+            data.put(prefix + "food", Integer.toString(brain.player.getFoodData().getFoodLevel()));
+            data.put(prefix + "health", Float.toString(brain.player.getHealth()));
+            data.put(prefix + "curiosity", Float.toString(brain.personality.curiosity()));
+            data.put(prefix + "industry", Float.toString(brain.personality.industriousness()));
+            data.put(prefix + "sociability", Float.toString(brain.personality.sociability()));
+            data.put(prefix + "caution", Float.toString(brain.personality.caution()));
+            data.put(prefix + "cooperation", Float.toString(brain.personality.cooperation()));
+            data.put(prefix + "state", brain.state.name());
+            data.put(prefix + "target", encodePos(brain.target));
+            data.put(prefix + "wander", encodePos(brain.wanderTarget));
+            data.put(prefix + "shelter", encodePos(brain.shelterOrigin));
+            data.put(prefix + "shelterIndex", Integer.toString(brain.shelterIndex));
+            data.put(prefix + "settlementName", brain.settlement == null ? null : brain.settlement.name());
+            data.put(prefix + "settlementCenter", brain.settlement == null ? "" : encodePos(brain.settlement.center()));
+            var registryOps = server.registryAccess().createSerializationContext(JsonOps.INSTANCE);
+            for (int slot = 0; slot < brain.player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = brain.player.getInventory().getItem(slot);
+                String inventoryKey = prefix + "inventory." + slot;
+                if (stack.isEmpty()) {
+                    data.put(inventoryKey, null);
+                } else {
+                    ItemStack.CODEC.encodeStart(registryOps, stack).result()
+                            .ifPresent(tag -> data.put(inventoryKey, tag.toString()));
+                }
+            }
+            for (Map.Entry<UUID, Integer> relationship : brain.relationships.entrySet()) {
+                data.put(prefix + "relationship." + relationship.getKey(), Integer.toString(relationship.getValue()));
+            }
+        }
+        data.setDirty();
+    }
+
+    private static void restoreCitizens(MinecraftServer server) {
+        Map<String, String> saved = memory(server).snapshot();
+        Set<UUID> citizens = new HashSet<>();
+        for (String key : saved.keySet()) {
+            if (!key.startsWith("citizen.") || !key.endsWith(".name")) continue;
+            String id = key.substring("citizen.".length(), key.length() - ".name".length());
+            try { citizens.add(UUID.fromString(id)); } catch (IllegalArgumentException ignored) {}
+        }
+
+        for (UUID id : citizens) {
+            String prefix = "citizen." + id + ".";
+            String name = saved.get(prefix + "name");
+            String dimension = saved.get(prefix + "dimension");
+            if (name == null || dimension == null) continue;
+            ServerLevel level = null;
+            for (ServerLevel candidate : server.getAllLevels()) {
+                if (candidate.dimension().toString().equals(dimension)) {
+                    level = candidate;
+                    break;
+                }
+            }
+            if (level == null) continue;
+            try {
+                double x = Double.parseDouble(saved.getOrDefault(prefix + "x", "0"));
+                double y = Double.parseDouble(saved.getOrDefault(prefix + "y", "80"));
+                double z = Double.parseDouble(saved.getOrDefault(prefix + "z", "0"));
+                BlockPos pos = BlockPos.containing(x, y, z);
+                if (!level.hasChunkAt(pos)) continue;
+                FakePlayer restored = createBot(level, pos, name, id, false);
+                BotBrain brain = BOTS.get(id);
+                if (brain != null) {
+                    String savedSettlementName = saved.get(prefix + "settlementName");
+                    BlockPos savedSettlementCenter = decodePos(saved.get(prefix + "settlementCenter"));
+                    if (savedSettlementName != null && savedSettlementCenter != null) {
+                        Settlement settlement = SETTLEMENTS.values().stream()
+                                .filter(existing -> existing.level() == level
+                                        && existing.name().equals(savedSettlementName)
+                                        && existing.center().distSqr(savedSettlementCenter) <= 4)
+                                .findFirst().orElseGet(() -> {
+                                    Settlement created = new Settlement(savedSettlementName, level, savedSettlementCenter);
+                                    SETTLEMENTS.put(created.id(), created);
+                                    return created;
+                                });
+                        settlement.addMember(id, brain.profession);
+                        brain.settlement = settlement;
+                    }
+                    var registryOps = server.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+                    for (int slot = 0; slot < restored.getInventory().getContainerSize(); slot++) {
+                        String encoded = saved.get(prefix + "inventory." + slot);
+                        if (encoded == null || encoded.isBlank()) continue;
+                        try {
+                            JsonElement json = JsonParser.parseString(encoded);
+                            int inventorySlot = slot;
+                            ItemStack.CODEC.parse(registryOps, json).result()
+                                    .ifPresent(stack -> restored.getInventory().setItem(inventorySlot, stack));
+                        } catch (Exception invalidStack) {
+                            LOGGER.warn("[Civilization AI] Skipped invalid saved inventory stack for {} slot {}", id, slot);
+                        }
+                    }
+                }
+            } catch (RuntimeException exception) {
+                LOGGER.warn("[Civilization AI] Could not restore citizen {}", id, exception);
+            }
+        }
+        LOGGER.info("[Civilization AI] Restored {} persistent citizen memories.", BOTS.size());
+    }
+
+    private static String encodePos(BlockPos pos) {
+        return pos == null ? "" : pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    private static BlockPos decodePos(String encoded) {
+        if (encoded == null || encoded.isBlank()) return null;
+        try {
+            String[] parts = encoded.split(",");
+            return new BlockPos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private static void coordinateTeams() {
         List<BotBrain> active = new ArrayList<>(BOTS.values());
         for (int i = 0; i < active.size(); i++) {
-            BotBrain leader = active.get(i);
-            if (leader.player.isRemoved()) continue;
+            BotBrain first = active.get(i);
+            if (first.player.isRemoved()) continue;
             for (int j = i + 1; j < active.size(); j++) {
-                BotBrain member = active.get(j);
-                if (member.player.isRemoved() || member.level != leader.level) continue;
-                if (leader.player.distanceToSqr(member.player) > 36.0) continue;
+                BotBrain second = active.get(j);
+                if (second.player.isRemoved() || second.level != first.level) continue;
+                double distance = first.player.distanceToSqr(second.player);
+                if (distance > 36.0) continue;
 
-                Vec3 towardMember = member.player.getEyePosition().subtract(leader.player.getEyePosition());
-                float leaderYaw = (float) (Math.atan2(-towardMember.x, towardMember.z) * (180.0 / Math.PI));
-                leader.player.setYRot(leaderYaw);
-                leader.player.setYHeadRot(leaderYaw);
-                leader.player.yBodyRot = leaderYaw;
-                leader.player.setShiftKeyDown(true);
-                member.player.setShiftKeyDown(true);
-                leader.crouchTicks = Math.max(leader.crouchTicks, 20);
-                member.crouchTicks = Math.max(member.crouchTicks, 20);
-
-                // Share spare building blocks so the pair can contribute to one shelter.
-                for (int slot = 0; slot < member.player.getInventory().getContainerSize(); slot++) {
-                    ItemStack stack = member.player.getInventory().getItem(slot);
-                    if (stack.isEmpty() || Block.byItem(stack.getItem()) == Blocks.AIR) continue;
-                    ItemStack transfer = stack.copy();
-                    transfer.setCount(Math.min(8, stack.getCount()));
-                    int moved = transfer.getCount();
-                    if (leader.player.getInventory().add(transfer)) stack.shrink(moved);
-                    break;
+                UUID firstId = second.player.getUUID();
+                UUID secondId = first.player.getUUID();
+                int bondGain = Math.max(1, Math.round(
+                        first.personality.sociability() + second.personality.sociability()
+                                + first.personality.cooperation() * 0.5F
+                ));
+                int bond = Math.min(100, first.relationships.getOrDefault(firstId, 0) + bondGain);
+                first.relationships.put(firstId, bond);
+                second.relationships.put(secondId, bond);
+                if (first.settlement != null && second.settlement == null) {
+                    first.settlement.addMember(second.player.getUUID(), second.profession);
+                    second.settlement = first.settlement;
+                } else if (second.settlement != null && first.settlement == null) {
+                    second.settlement.addMember(first.player.getUUID(), first.profession);
+                    first.settlement = second.settlement;
                 }
+
+                // Friendship gestures are occasional and only happen when neither bot is busy.
+                if (bond >= 40 && first.personality.sociability() > 0.55F
+                        && second.personality.sociability() > 0.55F
+                        && first.friendshipGestureCooldown == 0
+                        && second.friendshipGestureCooldown == 0
+                        && first.target == null && second.target == null
+                        && first.state != State.BUILDING && second.state != State.BUILDING) {
+                    Vec3 towardSecond = second.player.getEyePosition().subtract(first.player.getEyePosition());
+                    float firstYaw = (float) (Math.atan2(-towardSecond.x, towardSecond.z) * (180.0 / Math.PI));
+                    first.player.setYRot(firstYaw);
+                    first.player.setYHeadRot(firstYaw);
+                    first.player.yBodyRot = firstYaw;
+
+                    Vec3 towardFirst = first.player.getEyePosition().subtract(second.player.getEyePosition());
+                    float secondYaw = (float) (Math.atan2(-towardFirst.x, towardFirst.z) * (180.0 / Math.PI));
+                    second.player.setYRot(secondYaw);
+                    second.player.setYHeadRot(secondYaw);
+                    second.player.yBodyRot = secondYaw;
+
+                    first.crouchTicks = 16;
+                    second.crouchTicks = 16;
+                    first.friendshipGestureCooldown = 240;
+                    second.friendshipGestureCooldown = 240;
+                }
+            }
+        }
+    }
+
+    private static void assignNearestSettlement(BotBrain brain) {
+        Settlement closest = null;
+        double bestDistance = 48.0 * 48.0;
+        for (Settlement settlement : SETTLEMENTS.values()) {
+            if (settlement.level() != brain.level) continue;
+            double distance = settlement.center().distSqr(brain.player.blockPosition());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                closest = settlement;
+            }
+        }
+        if (closest != null) {
+            closest.addMember(brain.player.getUUID(), brain.profession);
+            brain.settlement = closest;
+        }
+    }
+
+    private static void registerSettlement(BotBrain founder, BlockPos center) {
+        Settlement settlement = null;
+        for (Settlement candidate : SETTLEMENTS.values()) {
+            if (candidate.level() == founder.level
+                    && candidate.center().distSqr(center) <= 48 * 48) {
+                settlement = candidate;
+                break;
+            }
+        }
+        if (settlement == null) {
+            String[] names = {"Oakridge", "Riverstead", "Stonehaven", "Pinewatch", "Meadowbrook", "Ashford"};
+            String name = names[RANDOM.nextInt(names.length)];
+            settlement = new Settlement(name, founder.level, center);
+            SETTLEMENTS.put(settlement.id(), settlement);
+            founder.level.getServer().getPlayerList().broadcastSystemMessage(
+                    Component.literal("A new settlement has been founded: " + name + "!"),
+                    false
+            );
+        }
+        settlement.addMember(founder.player.getUUID(), founder.profession);
+        founder.settlement = settlement;
+        settlement.moveCenter(center);
+        for (BotBrain citizen : BOTS.values()) {
+            if (citizen == founder || citizen.level != founder.level) continue;
+            if (citizen.player.blockPosition().distSqr(center) <= 48 * 48) {
+                settlement.addMember(citizen.player.getUUID(), citizen.profession);
+                citizen.settlement = settlement;
             }
         }
     }
@@ -253,20 +485,76 @@ public final class CivilizationAI implements ModInitializer {
         private State state = State.SEARCHING;
         private int crouchTicks;
         private int socialCooldown;
+        private int friendshipGestureCooldown;
+        private final Map<UUID, Integer> relationships = new HashMap<>();
         private BlockPos wanderTarget;
         private int farmCooldown;
+        private BlockPos miningTarget;
+        private float miningProgress;
+        private final Personality personality;
+        private final Personality.Profession profession;
+        private Settlement settlement;
+        private BlockPos foodTarget;
+        private int foodActionCooldown;
+        private List<BlockPos> navigationPath = new ArrayList<>();
+        private BlockPos pathDestination;
+        private int pathRecalculationCooldown;
 
         private BotBrain(FakePlayer player, ServerLevel level) {
             this.player = player;
             this.level = level;
+            String prefix = "citizen." + player.getUUID() + ".";
+            CivilizationMemoryData data = memory(level.getServer());
+            Map<String, String> saved = data.snapshot();
+            this.personality = new Personality(
+                    parseFloat(saved.get(prefix + "curiosity"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "industry"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "sociability"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "caution"), RANDOM.nextFloat() * 0.8F + 0.2F),
+                    parseFloat(saved.get(prefix + "cooperation"), RANDOM.nextFloat() * 0.8F + 0.2F)
+            );
+            this.profession = personality.preferredProfession();
+            this.state = parseState(saved.get(prefix + "state"));
+            this.target = decodePos(saved.get(prefix + "target"));
+            this.wanderTarget = decodePos(saved.get(prefix + "wander"));
+            this.shelterOrigin = decodePos(saved.get(prefix + "shelter"));
+            this.shelterIndex = parseInt(saved.get(prefix + "shelterIndex"), 0);
+            player.getFoodData().setFoodLevel(parseInt(saved.get(prefix + "food"), 20));
+            player.setHealth(Math.min(player.getMaxHealth(), parseFloat(saved.get(prefix + "health"), player.getMaxHealth())));
+            String relationshipPrefix = prefix + "relationship.";
+            for (Map.Entry<String, String> entry : saved.entrySet()) {
+                if (!entry.getKey().startsWith(relationshipPrefix)) continue;
+                try {
+                    relationships.put(UUID.fromString(entry.getKey().substring(relationshipPrefix.length())),
+                            parseInt(entry.getValue(), 0));
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        private static float parseFloat(String value, float fallback) {
+            try { return value == null ? fallback : Float.parseFloat(value); }
+            catch (NumberFormatException ignored) { return fallback; }
+        }
+
+        private static int parseInt(String value, int fallback) {
+            try { return value == null ? fallback : Integer.parseInt(value); }
+            catch (NumberFormatException ignored) { return fallback; }
+        }
+
+        private static State parseState(String value) {
+            try { return value == null ? State.SEARCHING : State.valueOf(value); }
+            catch (IllegalArgumentException ignored) { return State.SEARCHING; }
         }
 
         private void tick(int gameTick) {
             if (actionCooldown > 0) actionCooldown--;
             if (scanCooldown > 0) scanCooldown--;
             if (socialCooldown > 0) socialCooldown--;
+            if (friendshipGestureCooldown > 0) friendshipGestureCooldown--;
             if (farmCooldown > 0) farmCooldown--;
+            if (foodActionCooldown > 0) foodActionCooldown--;
             if (crouchTicks > 0) { crouchTicks--; player.setShiftKeyDown(true); } else player.setShiftKeyDown(false);
+            if (manageSurvival()) return;
             handleNearbyPlayers();
 
             if (state == State.BUILDING) {
@@ -276,30 +564,46 @@ public final class CivilizationAI implements ModInitializer {
 
             if (target == null || scanCooldown == 0) {
                 if (target == null || player.blockPosition().distSqr(target) < 4 || scanCooldown == 0) {
-                    target = findNearestTreeLog(50);
+                    int searchRadius = 14 + Math.round(personality.curiosity() * 12.0F);
+                    if (profession == Personality.Profession.FARMER
+                            && countItem(Items.WHEAT_SEEDS) < 8) {
+                        target = findNearestGrass(24);
+                    }
+                    if (target == null && needsWoodForPlan()
+                            && (settlement == null || settlement.claimTask("wood", player.getUUID()))) {
+                        target = findNearestTreeLog(searchRadius);
+                    }
+                    if (target == null && countItem(Items.STONE_PICKAXE) == 0
+                            && countItem(Items.COBBLESTONE) < 3
+                            && countItem(Items.WOODEN_PICKAXE) > 0) {
+                        target = findNearestExposedStone(12);
+                    }
                     if (target == null && countItem(Items.WHEAT_SEEDS) < 4) target = findNearestGrass(24);
                     if (target == null) {
                         target = null;
                         state = State.EXPLORING;
                         if (wanderTarget == null || player.blockPosition().distSqr(wanderTarget) < 9) {
-                            int dx = RANDOM.nextInt(61) - 30;
-                            int dz = RANDOM.nextInt(61) - 30;
+                            int wanderRadius = 12 + Math.round(personality.curiosity() * 24)
+                                    + (profession == Personality.Profession.SCOUT ? 12 : 0);
+                            int dx = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
+                            int dz = RANDOM.nextInt(wanderRadius * 2 + 1) - wanderRadius;
                             wanderTarget = player.blockPosition().offset(dx, 0, dz);
                         }
                     } else {
                         state = State.SEARCHING;
                     }
-                    scanCooldown = 100;
+                    // Desynchronise expensive world scans between citizens.
+                    scanCooldown = 80 + RANDOM.nextInt(81);
                 }
             }
 
             if (target != null) {
                 lookAtBlock(target);
-                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0) {
+                if (player.distanceToSqr(Vec3.atCenterOf(target)) <= 20.25) {
                     if (actionCooldown == 0) {
-                        gatherTarget();
-                        actionCooldown = 12;
-                        target = null;
+                        boolean finished = gatherTarget();
+                        actionCooldown = finished ? 8 : 1;
+                        if (finished) target = null;
                     }
                 } else {
                     walkToward(target);
@@ -315,17 +619,90 @@ public final class CivilizationAI implements ModInitializer {
                 lookAround(gameTick);
             }
 
-            convertLogsToPlanks();
-            advanceCrafting();
-            manageFoodAndFarm(gameTick);
-            if (countPlanks() >= 16) {
-                state = State.BUILDING;
-                shelterOrigin = player.blockPosition().offset(3, 0, 0);
-                shelterIndex = 0;
-                target = null;
+            if (gameTick % 20 == 0) VanillaCraftingController.tick(player, level);
+            if (profession == Personality.Profession.FARMER
+                    || player.getFoodData().getFoodLevel() <= 12) {
+                manageFoodAndFarm(gameTick);
+            }
+            int shelterMaterialGoal = profession == Personality.Profession.BUILDER ? 17 : 21;
+            if (countPlanks() >= shelterMaterialGoal && state != State.BUILDING) {
+                BlockPos site = findShelterSite(personality.caution() > 0.7F ? 10 : 8);
+                if (site != null) {
+                    state = State.BUILDING;
+                    shelterOrigin = site;
+                    shelterIndex = 0;
+                    target = null;
+                    wanderTarget = null;
+                }
             }
         }
 
+
+        private boolean manageSurvival() {
+            if (SurvivalController.eatFromInventory(player)) {
+                foodTarget = null;
+                return true;
+            }
+            if (player.getFoodData().getFoodLevel() > 8) {
+                foodTarget = null;
+                return false;
+            }
+
+            // Prefer non-combat food gathering when critically hungry. Mature
+            // berry bushes are harvested through the normal block interaction.
+            if (foodTarget == null || !level.getBlockState(foodTarget).is(Blocks.SWEET_BERRY_BUSH)
+                    || foodTarget.distSqr(player.blockPosition()) > 24 * 24) {
+                foodTarget = findNearestBerryBush(20);
+            }
+            if (foodTarget == null) return false;
+
+            if (player.distanceToSqr(Vec3.atCenterOf(foodTarget)) > 4.0) {
+                walkToward(foodTarget);
+                return true;
+            }
+
+            MovementController.stop(player);
+            lookAtBlock(foodTarget);
+            if (foodActionCooldown == 0) {
+                int before = countItem(Items.SWEET_BERRIES);
+                BlockHitResult hit = new BlockHitResult(
+                        Vec3.atCenterOf(foodTarget), Direction.UP, foodTarget, false
+                );
+                player.gameMode.useItemOn(
+                        player, level, ItemStack.EMPTY, net.minecraft.world.InteractionHand.MAIN_HAND, hit
+                );
+                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                foodActionCooldown = 20;
+                if (countItem(Items.SWEET_BERRIES) > before
+                        || !level.getBlockState(foodTarget).is(Blocks.SWEET_BERRY_BUSH)) {
+                    foodTarget = null;
+                }
+            }
+            return true;
+        }
+
+        private BlockPos findNearestBerryBush(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dy = -3; dy <= 5; dy++) {
+                        BlockPos pos = center.offset(dx, dy, dz);
+                        if (!level.hasChunkAt(pos)) continue;
+                        BlockState state = level.getBlockState(pos);
+                        if (!state.is(Blocks.SWEET_BERRY_BUSH)
+                                || state.getValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE) < 2) continue;
+                        double distance = pos.distSqr(center);
+                        if (distance < bestDistance) {
+                            best = pos.immutable();
+                            bestDistance = distance;
+                        }
+                    }
+                }
+            }
+            return best;
+        }
 
         private int countItem(net.minecraft.world.item.Item item) {
             int total = 0;
@@ -334,6 +711,28 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.is(item)) total += stack.getCount();
             }
             return total;
+        }
+
+        private boolean isPlank(ItemStack stack) {
+            net.minecraft.world.item.Item item = stack.getItem();
+            return item == Items.OAK_PLANKS || item == Items.SPRUCE_PLANKS
+                    || item == Items.BIRCH_PLANKS || item == Items.JUNGLE_PLANKS
+                    || item == Items.ACACIA_PLANKS || item == Items.DARK_OAK_PLANKS
+                    || item == Items.MANGROVE_PLANKS || item == Items.CHERRY_PLANKS
+                    || item == Items.CRIMSON_PLANKS || item == Items.WARPED_PLANKS;
+        }
+
+        private boolean removePlanks(int amount) {
+            if (countPlanks() < amount) return false;
+            int remaining = amount;
+            for (int i = 0; i < player.getInventory().getContainerSize() && remaining > 0; i++) {
+                ItemStack stack = player.getInventory().getItem(i);
+                if (!isPlank(stack)) continue;
+                int removed = Math.min(remaining, stack.getCount());
+                stack.shrink(removed);
+                remaining -= removed;
+            }
+            return remaining == 0;
         }
 
         private boolean removeItems(net.minecraft.world.item.Item item, int amount) {
@@ -349,65 +748,77 @@ public final class CivilizationAI implements ModInitializer {
             return remaining == 0;
         }
 
-        private void advanceCrafting() {
-            if (countItem(Items.CRAFTING_TABLE) == 0 && countItem(Items.OAK_PLANKS) >= 4) {
-                removeItems(Items.OAK_PLANKS, 4);
-                player.getInventory().add(new ItemStack(Items.CRAFTING_TABLE));
-            }
-            if (countItem(Items.STICK) < 2 && countItem(Items.OAK_PLANKS) >= 2) {
-                removeItems(Items.OAK_PLANKS, 2);
-                player.getInventory().add(new ItemStack(Items.STICK, 4));
-            }
-            if (countItem(Items.WOODEN_PICKAXE) == 0
-                    && countItem(Items.OAK_PLANKS) >= 3 && countItem(Items.STICK) >= 2) {
-                removeItems(Items.OAK_PLANKS, 3);
-                removeItems(Items.STICK, 2);
-                player.getInventory().add(new ItemStack(Items.WOODEN_PICKAXE));
-            }
-        }
-
         private void manageFoodAndFarm(int gameTick) {
-            if (gameTick % 40 != 0 || farmCooldown > 0) return;
-            farmCooldown = 40;
+            if (gameTick % 20 != 0 || farmCooldown > 0) return;
+            farmCooldown = 20;
+
+            // Harvest only crops the citizen can physically reach and see.
             for (BlockPos pos : BlockPos.betweenClosed(
-                    player.blockPosition().offset(-8, -2, -8),
-                    player.blockPosition().offset(8, 2, 8))) {
+                    player.blockPosition().offset(-6, -2, -6),
+                    player.blockPosition().offset(6, 2, 6))) {
                 BlockState cropState = level.getBlockState(pos);
                 if (cropState.getBlock() instanceof CropBlock crop
-                        && cropState.getValue(CropBlock.AGE) >= crop.getMaxAge()) {
-                    level.destroyBlock(pos, false, player);
-                    player.getInventory().add(new ItemStack(Items.WHEAT));
-                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
+                        && cropState.getValue(CropBlock.AGE) >= crop.getMaxAge()
+                        && player.distanceToSqr(Vec3.atCenterOf(pos)) <= 4.0
+                        && hasClearLineOfSight(pos)) {
+                    lookAtBlock(pos);
+                    if (level.destroyBlock(pos, true, player)) {
+                        player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                    }
                     break;
                 }
             }
+
             if (countItem(Items.WHEAT_SEEDS) > 0) {
                 BlockPos base = player.blockPosition();
                 for (int dx = -3; dx <= 3; dx++) {
                     for (int dz = -3; dz <= 3; dz++) {
                         BlockPos soil = base.offset(dx, -1, dz);
                         BlockPos cropPos = soil.above();
-                        if (level.getBlockState(cropPos).isAir()
-                                && (level.getBlockState(soil).is(Blocks.DIRT)
-                                || level.getBlockState(soil).is(Blocks.GRASS_BLOCK))) {
-                            level.setBlock(soil, Blocks.FARMLAND.defaultBlockState(), 3);
-                            level.setBlock(cropPos, Blocks.WHEAT.defaultBlockState(), 3);
-                            removeItems(Items.WHEAT_SEEDS, 1);
-                            return;
+                        if (!level.getBlockState(cropPos).isAir()
+                                || player.distanceToSqr(Vec3.atCenterOf(soil)) > 4.0
+                                || !hasClearLineOfSight(soil)) continue;
+
+                        BlockState soilState = level.getBlockState(soil);
+                        if (soilState.is(Blocks.DIRT) || soilState.is(Blocks.GRASS_BLOCK)) {
+                            ItemStack hoe = findTool(Items.WOODEN_HOE);
+                            if (hoe == null) continue;
+                            lookAtBlock(soil);
+                            BlockHitResult tillHit = new BlockHitResult(
+                                    Vec3.atCenterOf(soil).add(0, 0.5, 0),
+                                    Direction.UP, soil, false
+                            );
+                            player.gameMode.useItemOn(
+                                    player, level, hoe, net.minecraft.world.InteractionHand.MAIN_HAND, tillHit
+                            );
+                            soilState = level.getBlockState(soil);
                         }
+
+                        if (!soilState.is(Blocks.FARMLAND)) continue;
+                        ItemStack seeds = findTool(Items.WHEAT_SEEDS);
+                        if (seeds == null) continue;
+                        lookAtBlock(soil);
+                        BlockHitResult plantHit = new BlockHitResult(
+                                Vec3.atCenterOf(soil).add(0, 0.5, 0),
+                                Direction.UP, soil, false
+                        );
+                        player.gameMode.useItemOn(
+                                player, level, seeds, net.minecraft.world.InteractionHand.MAIN_HAND, plantHit
+                        );
+                        if (level.getBlockState(cropPos).is(Blocks.WHEAT)) return;
                     }
                 }
             }
-            if (countItem(Items.WHEAT) >= 3) {
-                removeItems(Items.WHEAT, 3);
-                player.getInventory().add(new ItemStack(Items.BREAD));
-            }
-            if (player.getFoodData().getFoodLevel() <= 14 && countItem(Items.BREAD) > 0) {
-                removeItems(Items.BREAD, 1);
-                player.getFoodData().setFoodLevel(Math.min(20, player.getFoodData().getFoodLevel() + 5));
-            }
+
         }
 
+        private ItemStack findTool(net.minecraft.world.item.Item item) {
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.is(item)) return stack;
+            }
+            return null;
+        }
 
         private BlockPos findNearestGrass(int radius) {
             BlockPos center = player.blockPosition();
@@ -432,6 +843,31 @@ public final class CivilizationAI implements ModInitializer {
             return best;
         }
 
+        private BlockPos findNearestExposedStone(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
+                    if (x * x + z * z > radius * radius) continue;
+                    for (int y = -3; y <= 5; y++) {
+                        BlockPos pos = center.offset(x, y, z);
+                        if (!level.hasChunkAt(pos)) continue;
+                        BlockState state = level.getBlockState(pos);
+                        if (!(state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                                || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE))) continue;
+                        if (!hasClearLineOfSight(pos)) continue;
+                        double distance = pos.distSqr(center);
+                        if (distance < bestDistance) {
+                            best = pos.immutable();
+                            bestDistance = distance;
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
         private BlockPos findNearestTreeLog(int radius) {
             BlockPos center = player.blockPosition();
             BlockPos best = null;
@@ -442,7 +878,8 @@ public final class CivilizationAI implements ModInitializer {
                     for (int y = -4; y <= 16; y++) {
                         BlockPos pos = center.offset(x, y, z);
                         if (!level.hasChunkAt(pos)) continue;
-                        if (level.getBlockState(pos).is(BlockTags.LOGS)) {
+                        if (level.getBlockState(pos).is(BlockTags.LOGS)
+                                && hasClearLineOfSight(pos)) {
                             double distance = pos.distSqr(center);
                             if (distance < bestDistance) {
                                 best = pos.immutable();
@@ -480,61 +917,180 @@ public final class CivilizationAI implements ModInitializer {
         }
 
         private void walkToward(BlockPos destination) {
-            Vec3 current = player.position();
-            Vec3 targetPoint = Vec3.atBottomCenterOf(destination);
-            Vec3 direction = new Vec3(targetPoint.x - current.x, 0, targetPoint.z - current.z);
-            double distance = direction.length();
-            if (distance < 0.05) return;
-            // Small per-tick steps avoid visible position jumps from coarse 5-tick updates.
-            Vec3 step = direction.normalize().scale(Math.min(0.075, distance));
-            float desiredYaw = (float) (Math.atan2(-step.x, step.z) * (180.0 / Math.PI));
-            float yawDelta = net.minecraft.util.Mth.wrapDegrees(desiredYaw - player.getYRot());
-            player.setYRot(player.getYRot() + net.minecraft.util.Mth.clamp(yawDelta, -2.5F, 2.5F));
-            player.yBodyRot = player.getYRot();
-            Vec3 velocity = player.getDeltaMovement();
-            double gravity = player.onGround() ? 0.0 : Math.max(-0.45, velocity.y - 0.08);
-            Vec3 motion = new Vec3(step.x, gravity, step.z);
-            if (!level.noCollision(player, player.getBoundingBox().move(step.x, 0, step.z))) {
-                if (player.onGround() && level.noCollision(player, player.getBoundingBox().move(step.x, 1.0, step.z))) {
-                    player.jumpFromGround();
-                    motion = new Vec3(step.x, 0.42, step.z);
-                } else motion = new Vec3(0, gravity, 0);
+            if (destination == null) return;
+            if (pathRecalculationCooldown > 0) pathRecalculationCooldown--;
+
+            if (!destination.equals(pathDestination)
+                    || (navigationPath.isEmpty() && pathRecalculationCooldown == 0)) {
+                pathDestination = destination.immutable();
+                navigationPath = GroundPathfinder.findPath(level, player.blockPosition(), destination);
+                pathRecalculationCooldown = 20;
             }
-            player.move(MoverType.SELF, motion);
-            player.setDeltaMovement(motion);
-            player.setSprinting(true);
+
+            while (!navigationPath.isEmpty()) {
+                BlockPos waypoint = navigationPath.get(0);
+                double dx = waypoint.getX() + 0.5 - player.getX();
+                double dz = waypoint.getZ() + 0.5 - player.getZ();
+                double dy = waypoint.getY() - player.getY();
+                if (dx * dx + dz * dz < 0.16 && Math.abs(dy) < 0.65) {
+                    navigationPath.remove(0);
+                } else {
+                    break;
+                }
+            }
+
+            if (navigationPath.isEmpty()) {
+                MovementController.stop(player);
+                return;
+            }
+
+            BlockPos waypoint = navigationPath.get(0);
+            Vec3 offset = new Vec3(
+                    waypoint.getX() + 0.5 - player.getX(),
+                    0,
+                    waypoint.getZ() + 0.5 - player.getZ()
+            );
+            double distance = offset.length();
+            if (distance < 0.05) return;
+
+            Vec3 direction = offset.normalize();
+            MovementController.face(player, new Vec3(
+                    waypoint.getX() + 0.5,
+                    waypoint.getY() + 0.1,
+                    waypoint.getZ() + 0.5
+            ));
+
+            // Jump only for a path waypoint one block above the current feet position.
+            // Gravity, falling and collision response are handled by vanilla entity ticking.
+            if (waypoint.getY() > player.blockPosition().getY() && player.onGround()) {
+                player.jumpFromGround();
+            }
+
+            // Do not integrate coordinates here. Supply horizontal velocity intent and
+            // let Minecraft perform the actual move, gravity and collision resolution.
+            MovementController.moveToward(player, direction, distance > 3.0 && player.onGround());
         }
 
-        private void gatherTarget() {
-            if (target == null) return;
+        private boolean gatherTarget() {
+            if (target == null) return true;
+
             lookAtBlock(target);
-            if (player.distanceToSqr(Vec3.atCenterOf(target)) > 4.0) return;
-            BlockState state = level.getBlockState(target);
-            if (state.isAir() || state.getDestroySpeed(level, target) < 0) return;
-            Block itemBlock = state.getBlock();
-            player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-            if (level.destroyBlock(target, false, player)) {
-                ItemStack collected = new ItemStack(itemBlock.asItem());
-                if (!collected.isEmpty()) player.getInventory().add(collected);
-                if ((state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS))
-                        && RANDOM.nextInt(3) == 0 && countItem(Items.WHEAT_SEEDS) < 16) {
-                    player.getInventory().add(new ItemStack(Items.WHEAT_SEEDS));
-                }
-                level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().getName() + "> I found some " + itemBlock.getName().getString().toLowerCase() + "."),
-                        false
-                );
+            MovementController.stop(player);
+            double distance = player.distanceToSqr(Vec3.atCenterOf(target));
+            if (distance > 20.25) {
+                miningTarget = null;
+                miningProgress = 0;
+                return false;
             }
+
+            BlockState state = level.getBlockState(target);
+            if (state.isAir() || state.getDestroySpeed(level, target) < 0
+                    || !hasClearLineOfSight(target)) {
+                miningTarget = null;
+                miningProgress = 0;
+                return true;
+            }
+
+            if (!target.equals(miningTarget)) {
+                miningTarget = target.immutable();
+                miningProgress = 0;
+            }
+
+            // Select a suitable tool into the real main hand before calculating
+            // vanilla destroy progress and invoking the normal server game mode.
+            selectMiningTool(state);
+            float progress = state.getDestroyProgress(player, level, target);
+            if (progress <= 0.0F) return false;
+
+            miningProgress = Math.min(1.0F, miningProgress + progress);
+            player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+            if (miningProgress < 1.0F) return false;
+
+            // ServerPlayerGameMode performs the normal survival break, tool
+            // durability, loot-table drops, block callbacks and statistics.
+            boolean broken = player.gameMode.destroyBlock(target);
+            miningTarget = null;
+            miningProgress = 0;
+            if (!broken && !level.getBlockState(target).isAir()) {
+                return true;
+            }
+            return true;
+        }
+
+        private void selectMiningTool(BlockState state) {
+            // Only select a pickaxe for stone-like blocks. Log gathering uses the
+            // currently held item and never changes to a combat-oriented item.
+            boolean stone = state.is(Blocks.STONE) || state.is(Blocks.ANDESITE)
+                    || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE);
+            if (!stone) return;
+
+            int selected = player.getInventory().getSelectedSlot();
+            ItemStack held = player.getInventory().getSelectedItem();
+            if (held.is(Items.WOODEN_PICKAXE) || held.is(Items.STONE_PICKAXE)
+                    || held.is(Items.IRON_PICKAXE) || held.is(Items.DIAMOND_PICKAXE)
+                    || held.is(Items.NETHERITE_PICKAXE)) return;
+
+            for (int slot = 0; slot < 9; slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.is(Items.WOODEN_PICKAXE) || stack.is(Items.STONE_PICKAXE)
+                        || stack.is(Items.IRON_PICKAXE) || stack.is(Items.DIAMOND_PICKAXE)
+                        || stack.is(Items.NETHERITE_PICKAXE)) {
+                    player.getInventory().setSelectedSlot(slot);
+                    return;
+                }
+            }
+            player.getInventory().setSelectedSlot(selected);
+        }
+
+        private boolean hasClearLineOfSight(BlockPos pos) {
+            Vec3 eye = player.getEyePosition();
+            Vec3 aim = Vec3.atCenterOf(pos);
+            BlockHitResult hit = level.clip(new ClipContext(
+                    eye, aim, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player
+            ));
+            return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(pos);
+        }
+
+        private BlockPos findShelterSite(int radius) {
+            BlockPos center = player.blockPosition();
+            BlockPos best = null;
+            double bestDistance = Double.MAX_VALUE;
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos floor = center.offset(dx, -1, dz);
+                    BlockPos origin = floor.above();
+                    double distance = origin.distSqr(center);
+                    if (distance < 16 || distance > radius * radius || distance >= bestDistance) continue;
+                    boolean valid = true;
+                    for (int x = -1; x <= 1 && valid; x++) {
+                        for (int z = -1; z <= 1 && valid; z++) {
+                            BlockPos ground = floor.offset(x, 0, z);
+                            if (!level.getBlockState(ground).isSolid()
+                                    || !level.getFluidState(ground).isEmpty()) {
+                                valid = false;
+                                break;
+                            }
+                            for (int y = 1; y <= 2; y++) {
+                                BlockPos space = ground.above(y);
+                                if (!level.getBlockState(space).isAir()
+                                        || !level.getFluidState(space).isEmpty()) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (valid) {
+                        best = origin.immutable();
+                        bestDistance = distance;
+                    }
+                }
+            }
+            return best;
         }
 
         private void lookAtBlock(BlockPos pos) {
-            Vec3 delta = Vec3.atCenterOf(pos).subtract(player.getEyePosition());
-            double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
-            float yaw = (float) (Math.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
-            float pitch = (float) (-Math.atan2(delta.y, horizontal) * (180.0 / Math.PI));
-            player.setYRot(yaw);
-            player.setYHeadRot(yaw);
-            player.setXRot(pitch);
+            MovementController.face(player, Vec3.atCenterOf(pos));
         }
 
         private void convertLogsToPlanks() {
@@ -543,17 +1099,83 @@ public final class CivilizationAI implements ModInitializer {
                 if (stack.isEmpty()) continue;
                 Block block = Block.byItem(stack.getItem());
                 if (!block.defaultBlockState().is(BlockTags.LOGS)) continue;
+
+                net.minecraft.world.item.Item plankItem = Items.OAK_PLANKS;
+                if (block == Blocks.SPRUCE_LOG || block == Blocks.SPRUCE_WOOD
+                        || block == Blocks.STRIPPED_SPRUCE_LOG || block == Blocks.STRIPPED_SPRUCE_WOOD) {
+                    plankItem = Items.SPRUCE_PLANKS;
+                } else if (block == Blocks.BIRCH_LOG || block == Blocks.BIRCH_WOOD
+                        || block == Blocks.STRIPPED_BIRCH_LOG || block == Blocks.STRIPPED_BIRCH_WOOD) {
+                    plankItem = Items.BIRCH_PLANKS;
+                } else if (block == Blocks.JUNGLE_LOG || block == Blocks.JUNGLE_WOOD
+                        || block == Blocks.STRIPPED_JUNGLE_LOG || block == Blocks.STRIPPED_JUNGLE_WOOD) {
+                    plankItem = Items.JUNGLE_PLANKS;
+                } else if (block == Blocks.ACACIA_LOG || block == Blocks.ACACIA_WOOD
+                        || block == Blocks.STRIPPED_ACACIA_LOG || block == Blocks.STRIPPED_ACACIA_WOOD) {
+                    plankItem = Items.ACACIA_PLANKS;
+                } else if (block == Blocks.DARK_OAK_LOG || block == Blocks.DARK_OAK_WOOD
+                        || block == Blocks.STRIPPED_DARK_OAK_LOG || block == Blocks.STRIPPED_DARK_OAK_WOOD) {
+                    plankItem = Items.DARK_OAK_PLANKS;
+                } else if (block == Blocks.MANGROVE_LOG || block == Blocks.MANGROVE_WOOD
+                        || block == Blocks.STRIPPED_MANGROVE_LOG || block == Blocks.STRIPPED_MANGROVE_WOOD) {
+                    plankItem = Items.MANGROVE_PLANKS;
+                } else if (block == Blocks.CHERRY_LOG || block == Blocks.CHERRY_WOOD
+                        || block == Blocks.STRIPPED_CHERRY_LOG || block == Blocks.STRIPPED_CHERRY_WOOD) {
+                    plankItem = Items.CHERRY_PLANKS;
+                } else if (block == Blocks.CRIMSON_STEM || block == Blocks.CRIMSON_HYPHAE
+                        || block == Blocks.STRIPPED_CRIMSON_STEM || block == Blocks.STRIPPED_CRIMSON_HYPHAE) {
+                    plankItem = Items.CRIMSON_PLANKS;
+                } else if (block == Blocks.WARPED_STEM || block == Blocks.WARPED_HYPHAE
+                        || block == Blocks.STRIPPED_WARPED_STEM || block == Blocks.STRIPPED_WARPED_HYPHAE) {
+                    plankItem = Items.WARPED_PLANKS;
+                }
                 int amount = stack.getCount() * 4;
                 stack.shrink(stack.getCount());
-                player.getInventory().add(new ItemStack(Items.OAK_PLANKS, amount));
+                int sharedAmount = settlement == null ? 0 : amount / 4;
+                if (sharedAmount > 0) settlement.deposit("planks", sharedAmount);
+                int personalAmount = amount - sharedAmount;
+                if (personalAmount > 0) player.getInventory().add(new ItemStack(plankItem, personalAmount));
             }
+        }
+
+        private int countLogs() {
+            int total = 0;
+            for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                if (stack.isEmpty()) continue;
+                Block block = Block.byItem(stack.getItem());
+                if (block != Blocks.AIR && block.defaultBlockState().is(BlockTags.LOGS)) {
+                    total += stack.getCount();
+                }
+            }
+            return total;
+        }
+
+        private int countWoodEquivalent() {
+            return countPlanks() + countLogs() * 4;
+        }
+
+        /**
+         * Wood is gathered only against a concrete near-term bill of materials:
+         * shelter blocks plus any missing starter station/tools. This prevents
+         * the old "find another tree" loop after the inventory is already ready.
+         */
+        private boolean needsWoodForPlan() {
+            int shelterGoal = profession == Personality.Profession.BUILDER ? 17 : 21;
+            int requiredPlanks = shelterGoal;
+            if (countItem(Items.CRAFTING_TABLE) == 0) requiredPlanks += 4;
+            if (countItem(Items.STICK) < 2) requiredPlanks += 2;
+            if (countItem(Items.WOODEN_PICKAXE) == 0) requiredPlanks += 3;
+            boolean needed = countWoodEquivalent() < requiredPlanks;
+            if (!needed && settlement != null) settlement.releaseTask("wood", player.getUUID());
+            return needed;
         }
 
         private int countPlanks() {
             int total = 0;
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                if (stack.is(Items.OAK_PLANKS)) total += stack.getCount();
+                if (isPlank(stack)) total += stack.getCount();
             }
             return total;
         }
@@ -569,13 +1191,20 @@ public final class CivilizationAI implements ModInitializer {
 
         private void buildShelter(int gameTick) {
             if (actionCooldown > 0) return;
-            if (shelterOrigin == null) shelterOrigin = player.blockPosition().offset(3, 0, 0);
+            if (shelterOrigin == null) shelterOrigin = findShelterSite(8);
+            if (shelterOrigin == null) {
+                state = State.EXPLORING;
+                return;
+            }
             if (shelterIndex >= SHELTER_LAYOUT.size()) {
+                BlockPos completedShelter = shelterOrigin.immutable();
+                registerSettlement(this, completedShelter);
                 state = State.EXPLORING;
                 shelterOrigin = null;
                 target = null;
-                player.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.literal("<" + player.getGameProfile().getName() + "> Shelter built! This place is ours. Time to explore."),
+                player.setSprinting(false);
+                level.getServer().getPlayerList().broadcastSystemMessage(
+                        Component.literal("<" + player.getGameProfile().name() + "> Our shelter is ready. Welcome to " + settlement.name() + "!"),
                         false
                 );
                 return;
@@ -586,33 +1215,73 @@ public final class CivilizationAI implements ModInitializer {
                     SHELTER_LAYOUT.get(shelterIndex).getY(),
                     SHELTER_LAYOUT.get(shelterIndex).getZ()
             );
-            shelterIndex++;
-            if (!level.getBlockState(placeAt).isAir()) return;
+            if (!level.getBlockState(placeAt).isAir()) {
+                shelterIndex++;
+                return;
+            }
+
+            if (countPlanks() == 0 && settlement != null && settlement.stock("planks") > 0) {
+                int shared = settlement.withdraw("planks", Math.min(4, settlement.stock("planks")));
+                if (shared > 0) player.getInventory().add(new ItemStack(Items.OAK_PLANKS, shared));
+            }
 
             for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = player.getInventory().getItem(slot);
-                if (stack.isEmpty()) continue;
-                Block block = Block.byItem(stack.getItem());
-                if (block != Blocks.OAK_PLANKS) continue;
-                player.getInventory().selected = slot;
+                if (stack.isEmpty() || !isPlank(stack)) continue;
+
                 if (player.distanceToSqr(Vec3.atCenterOf(placeAt)) > 20.25) {
                     walkToward(placeAt);
-                    shelterIndex--;
                     return;
                 }
-                player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
-                level.setBlock(placeAt, block.defaultBlockState(), 3);
-                stack.shrink(1);
-                player.containerMenu.broadcastChanges();
-                actionCooldown = 8;
+                lookAtBlock(placeAt);
+                if (placeShelterBlock(placeAt, stack)) {
+                    shelterIndex++;
+                    actionCooldown = 8;
+                }
                 return;
             }
+
             state = State.SEARCHING;
             target = null;
         }
 
+        private boolean placeShelterBlock(BlockPos placeAt, ItemStack stack) {
+            Block block = Block.byItem(stack.getItem());
+            if (block == Blocks.AIR || !level.getBlockState(placeAt).isAir()) return false;
+
+            // Use the server's normal player block-interaction pipeline, not setBlock().
+            for (Direction face : Direction.values()) {
+                BlockPos support = placeAt.relative(face.getOpposite());
+                BlockState supportState = level.getBlockState(support);
+                if (!supportState.isFaceSturdy(level, support, face)) continue;
+
+                Vec3 hitLocation = Vec3.atCenterOf(support).add(
+                        face.getStepX() * 0.499,
+                        face.getStepY() * 0.499,
+                        face.getStepZ() * 0.499
+                );
+                BlockHitResult sight = level.clip(new ClipContext(
+                        player.getEyePosition(), hitLocation,
+                        ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player
+                ));
+                if (sight.getType() != HitResult.Type.BLOCK || !sight.getBlockPos().equals(support)) continue;
+
+                BlockHitResult hit = new BlockHitResult(hitLocation, face, support, false);
+                player.gameMode.useItemOn(
+                        player, level, stack, net.minecraft.world.InteractionHand.MAIN_HAND, hit
+                );
+                if (level.getBlockState(placeAt).is(block)) {
+                    player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private void handleNearbyPlayers() {
             if (socialCooldown > 0) return;
+            // Social gestures are idle-only: never turn away from a mining/building target.
+            if (target != null || state == State.BUILDING) return;
             for (ServerPlayer nearby : level.players()) {
                 if (nearby == player || nearby.isRemoved() || nearby.distanceToSqr(player) > 25.0) continue;
                 Vec3 delta = nearby.getEyePosition().subtract(player.getEyePosition());
@@ -628,7 +1297,7 @@ public final class CivilizationAI implements ModInitializer {
                 player.setShiftKeyDown(true);
                 if (nearby.isShiftKeyDown()) {
                     level.getServer().getPlayerList().broadcastSystemMessage(
-                            Component.literal(player.getGameProfile().getName() + " and " + nearby.getGameProfile().getName() + " are teaming up!"),
+                            Component.literal(player.getGameProfile().name() + " and " + nearby.getGameProfile().name() + " are teaming up!"),
                             false
                     );
                 }
